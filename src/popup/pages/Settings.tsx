@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { loadSettingsDraft, saveSettingsDraft } from '../store/settingsDraft'
-import { logFetchFailed, sanitizeHeaders } from '@/shared/translate'
+import { listModelsViaSDK } from '@/shared/translate'
 import {
   activeModelId,
   addSource,
@@ -10,7 +10,6 @@ import {
   setActiveModelForSource,
   updateSource,
 } from '../store/models'
-
 function maskKey(k: string) {
   if (k.length <= 8) return '••••••••'
   return `${k.slice(0, 3)}••••${k.slice(-4)}`
@@ -175,33 +174,15 @@ export default function Settings() {
  return
  }
  setFetching(true)
-  let _logCtx: Record<string, unknown> | null = null
  try {
- const headers: Record<string, string> = { 'Content-Type': 'application/json' }
- const key = apiKey().trim()
- if (key) headers['Authorization'] = `Bearer ${key}`
-  _logCtx = {
-    url: `${base}/models`,
-    method: 'GET',
-    baseUrl: base,
-    headers: sanitizeHeaders(headers),
-  }
- const res = await fetch(`${base}/models`, { method: 'GET', headers })
- if (!res.ok) {
- const text = await res.text().catch(() => '')
- throw new Error(text || `请求失败 ${res.status}`)
- }
- const json = (await res.json().catch(() => null)) as unknown
- const list = extractModelIds(json)
- if (list.length === 0) throw new Error('未获取到模型列表')
- setAvailableModels(list)
+   const list = await listModelsViaSDK(base, apiKey().trim())
+   setAvailableModels(list)
  } catch (err) {
-  try { logFetchFailed('popup:Settings:fetchModels', err, _logCtx ?? { url: `${base}/models`, method: 'GET', baseUrl: base }) } catch {}
- const msg = err instanceof Error ? err.message : '获取失败'
- setFetchError(msg.length > 120 ? `${msg.slice(0, 120)}...` : msg)
- setAvailableModels([])
+   const msg = err instanceof Error ? err.message : '获取失败'
+   setFetchError(msg.length > 120 ? `${msg.slice(0, 120)}...` : msg)
+   setAvailableModels([])
  } finally {
- setFetching(false)
+   setFetching(false)
  }
 }
 
@@ -500,30 +481,3 @@ export default function Settings() {
  )
 }
 
-function extractModelIds(json: unknown): string[] {
- if (!json || typeof json !== 'object') return []
- const obj = json as Record<string, unknown>
- const candidates: unknown[] = []
- if (Array.isArray(obj['data'])) candidates.push(...(obj['data'] as unknown[]))
- if (Array.isArray(obj['models'])) candidates.push(...(obj['models'] as unknown[]))
- if (Array.isArray(obj['list'])) candidates.push(...(obj['list'] as unknown[]))
- if (Array.isArray(json)) candidates.push(...(json as unknown[]))
- const ids: string[] = []
- for (const item of candidates) {
- if (typeof item === 'string' && item.trim()) ids.push(item.trim())
- else if (item && typeof item === 'object') {
- const rec = item as Record<string, unknown>
- const v = rec['id'] ?? rec['name'] ?? rec['model']
- if (typeof v === 'string' && v.trim()) ids.push(v.trim())
- }
- }
- const seen: Record<string, true> = {}
- const deduped: string[] = []
- for (const id of ids) {
- if (!seen[id]) {
- seen[id] = true
- deduped.push(id)
- }
- }
- return deduped.slice(0, 50)
-}

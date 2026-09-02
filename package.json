@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "openai": "^7.9.0",
     "solid-js": "^1.9.11"
   },
   "devDependencies": {

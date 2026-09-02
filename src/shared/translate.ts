@@ -1,6 +1,6 @@
 // Shared translate helpers — used by popup ModelTranslate and background SW
-// Extracted from ModelTranslate.tsx to keep hy2-mt logic single-source
-
+// OpenAI SDK (browser) + hy-mt2 hand-written fallback
+import OpenAI from 'openai'
 export function extractContent(json: unknown): string {
   if (!json || typeof json !== 'object') return ''
   const obj = json as Record<string, unknown>
@@ -102,47 +102,165 @@ export function logFetchFailed(context: string, err: unknown, details: Record<st
   } catch {}
 }
 
-// helper to call LLM directly (for background, reuses same body building)
-export async function callLLM(baseUrl: string, apiKey: string, model: string, target: string, text: string, signal?: AbortSignal): Promise<string> {
+function getOpenAIClient(baseUrl: string, apiKey: string) {
   const base = baseUrl.replace(/\/$/, '')
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`
-  const { body } = buildChatBody(model, target, text)
-  const url = `${base}/chat/completions`
-  let res: Response
+  return new OpenAI({
+    baseURL: base,
+    apiKey: apiKey.trim() || 'sk-not-needed',
+    dangerouslyAllowBrowser: true,
+    // 显式使用原生 fetch，确保 service worker / popup 均可用
+    fetch: globalThis.fetch.bind(globalThis) as unknown as typeof fetch,
+  })
+}
+
+// helper to call LLM directly (for background, reuses same body building)
+// hy-mt2 保持手写 fetch 以保留 target_language/language/target_lang 字段；非 hy 走 OpenAI SDK
+export async function callLLM(baseUrl: string, apiKey: string, model: string, target: string, text: string, signal?: AbortSignal): Promise<string> {
+  const isHy = isHyModel(model)
+  const { body, hyTarget, modelForRequest } = buildChatBody(model, target, text)
+  if (isHy) {
+    const base = baseUrl.replace(/\/$/, '')
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`
+    const url = `${base}/chat/completions`
+    let res: Response
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      })
+    } catch (err) {
+      logFetchFailed('callLLM:hy', err, {
+        url,
+        method: 'POST',
+        baseUrl: base,
+        model,
+        target,
+        hyTarget,
+        textLength: text.length,
+        textPreview: text.slice(0, 80),
+        headers: sanitizeHeaders(headers),
+        bodyPreview: JSON.stringify(body).slice(0, 500),
+      })
+      throw err
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => '')
+      let msg = t
+      try {
+        const j = JSON.parse(t) as Record<string, unknown>
+        const err = j['error'] as Record<string, unknown> | undefined
+        if (err && typeof err['message'] === 'string') msg = err['message'] as string
+      } catch {}
+      throw new Error(msg || `请求失败 ${res.status}`)
+    }
+    const json = (await res.json()) as unknown
+    const content = extractContent(json)
+    if (!content) throw new Error('未获取到翻译结果')
+    return content
+  }
+  // 非 hy 走 OpenAI SDK
+  const client = getOpenAIClient(baseUrl, apiKey)
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    })
+    const completion = await client.chat.completions.create(
+      {
+        model: modelForRequest,
+        messages: body.messages as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+        temperature: body.temperature as number,
+        stream: false,
+      } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+      { signal },
+    )
+    const content = (completion.choices?.[0]?.message?.content ?? '').trim() || extractContent(completion as unknown)
+    if (!content) throw new Error('未获取到翻译结果')
+    return content
   } catch (err) {
-    logFetchFailed('callLLM', err, {
-      url,
-      method: 'POST',
-      baseUrl: base,
+    logFetchFailed('callLLM:openai', err, {
+      baseUrl: baseUrl.replace(/\/$/, ''),
       model,
       target,
+      modelForRequest,
       textLength: text.length,
       textPreview: text.slice(0, 80),
-      headers: sanitizeHeaders(headers),
-      bodyPreview: JSON.stringify(body).slice(0, 500),
     })
+    // 透传 OpenAI 的错误信息
+    if (err instanceof Error) {
+      const anyErr = err as unknown as { status?: number; error?: { message?: string }; message?: string }
+      const msg = (anyErr.error as { message?: string } | undefined)?.message || anyErr.message || err.message
+      throw new Error(msg || '请求失败')
+    }
     throw err
   }
-  if (!res.ok) {
-    const t = await res.text().catch(() => '')
-    let msg = t
+}
+
+// 通过 OpenAI SDK 拉取模型列表，失败回退 fetch
+export async function listModelsViaSDK(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<string[]> {
+  const client = getOpenAIClient(baseUrl, apiKey)
+  try {
+    const res = await client.models.list({ signal } as unknown as Record<string, unknown>)
+    const ids = (res.data ?? []).map((m) => (m.id ?? '').trim()).filter(Boolean)
+    if (ids.length) return ids.slice(0, 50)
+    throw new Error('未获取到模型列表')
+  } catch (err) {
+    logFetchFailed('listModelsViaSDK:openai', err, {
+      baseUrl: baseUrl.replace(/\/$/, ''),
+      method: 'GET',
+      url: `${baseUrl.replace(/\/$/, '')}/models`,
+    })
+    // 回退手写 fetch
+    const base = baseUrl.replace(/\/$/, '')
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`
+    let res: Response
     try {
-      const j = JSON.parse(t) as Record<string, unknown>
-      const err = j['error'] as Record<string, unknown> | undefined
-      if (err && typeof err['message'] === 'string') msg = err['message'] as string
-    } catch {}
-    throw new Error(msg || `请求失败 ${res.status}`)
+      res = await fetch(`${base}/models`, { method: 'GET', headers, signal })
+    } catch (e) {
+      logFetchFailed('listModelsViaSDK:fetch', e, {
+        url: `${base}/models`,
+        method: 'GET',
+        baseUrl: base,
+        headers: sanitizeHeaders(headers),
+      })
+      throw e
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => '')
+      throw new Error(t || `请求失败 ${res.status}`)
+    }
+    const json = (await res.json().catch(() => null)) as unknown
+    const list = extractModelIds(json)
+    if (list.length === 0) throw new Error('未获取到模型列表')
+    return list
   }
-  const json = (await res.json()) as unknown
-  const content = extractContent(json)
-  if (!content) throw new Error('未获取到翻译结果')
-  return content
+}
+
+// 兼容旧调用：从任意 JSON 抽模型 id 列表（供 fetch 回退用）
+function extractModelIds(json: unknown): string[] {
+  if (!json || typeof json !== 'object') return []
+  const obj = json as Record<string, unknown>
+  const candidates: unknown[] = []
+  if (Array.isArray(obj['data'])) candidates.push(...(obj['data'] as unknown[]))
+  if (Array.isArray(obj['models'])) candidates.push(...(obj['models'] as unknown[]))
+  if (Array.isArray(obj['list'])) candidates.push(...(obj['list'] as unknown[]))
+  if (Array.isArray(json)) candidates.push(...(json as unknown[]))
+  const ids: string[] = []
+  for (const item of candidates) {
+    if (typeof item === 'string' && item.trim()) ids.push(item.trim())
+    else if (item && typeof item === 'object') {
+      const rec = item as Record<string, unknown>
+      const v = rec['id'] ?? rec['name'] ?? rec['model']
+      if (typeof v === 'string' && v.trim()) ids.push(v.trim())
+    }
+  }
+  const seen: Record<string, true> = {}
+  const deduped: string[] = []
+  for (const id of ids) {
+    if (!seen[id]) {
+      seen[id] = true
+      deduped.push(id)
+    }
+  }
+  return deduped.slice(0, 50)
 }

@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { activeModelId, models, setActiveModel, setActiveModelForSource } from '../store/models'
 import { loadDraft, saveDraft } from '../store/draft'
-import { buildChatBody, extractContent, logFetchFailed, sanitizeHeaders } from '@/shared/translate'
+import { callLLM } from '@/shared/translate'
 export default function ModelTranslate() {
   const [input, setInput] = createSignal('')
   const [output, setOutput] = createSignal('')
@@ -10,7 +10,6 @@ export default function ModelTranslate() {
   const [terr, setTerr] = createSignal('')
   let draftLoaded = false
   let saveTimer: number | undefined = undefined
-
   onMount(async () => {
     try {
       const d = await loadDraft()
@@ -68,48 +67,14 @@ export default function ModelTranslate() {
  setTranslating(true)
  setTerr('')
  setOutput('')
-  let _logCtx: Record<string, unknown> | null = null
  try {
- const base = m.baseUrl.replace(/\/$/, '')
- const headers: Record<string, string> = { 'Content-Type': 'application/json' }
- if (m.apiKey.trim()) headers['Authorization'] = `Bearer ${m.apiKey.trim()}`
- const { body } = buildChatBody(m.activeModel, target(), text)
-  _logCtx = {
-    url: `${base}/chat/completions`,
-    method: 'POST',
-    baseUrl: base,
-    model: m.activeModel,
-    target: target(),
-    textLength: text.length,
-    textPreview: text.slice(0, 80),
-    headers: sanitizeHeaders(headers),
-    bodyPreview: JSON.stringify(body).slice(0, 800),
-  }
- const res = await fetch(`${base}/chat/completions`, {
- method: 'POST',
- headers,
- body: JSON.stringify(body),
- })
- if (!res.ok) {
- const t = await res.text().catch(() => '')
- let msg = t
- try {
- const j = JSON.parse(t) as Record<string, unknown>
- const err = j['error'] as Record<string, unknown> | undefined
- if (err && typeof err['message'] === 'string') msg = err['message'] as string
- } catch {}
- throw new Error(msg || `请求失败 ${res.status}`)
- }
- const json = (await res.json()) as unknown
- const content = extractContent(json)
- if (!content) throw new Error('未获取到翻译结果')
- setOutput(content)
+   const content = await callLLM(m.baseUrl, m.apiKey, m.activeModel, target(), text)
+   setOutput(content)
  } catch (e) {
-  try { logFetchFailed('popup:ModelTranslate', e, _logCtx ?? { target: target(), textLength: text.length, textPreview: text.slice(0, 80), model: m?.activeModel }) } catch {}
- const msg = e instanceof Error ? e.message : '翻译失败'
- setTerr(msg.length > 200 ? `${msg.slice(0, 200)}...` : msg)
+   const msg = e instanceof Error ? e.message : '翻译失败'
+   setTerr(msg.length > 200 ? `${msg.slice(0, 200)}...` : msg)
  } finally {
- setTranslating(false)
+   setTranslating(false)
  }
  }
 
