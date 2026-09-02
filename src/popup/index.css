@@ -1,0 +1,38 @@
+:root {
+  font-family: v-sans, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: rgb(51, 54, 57);
+  background-color: #ffffff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #fff;
+  overflow: hidden;
+}
+
+body {
+  min-width: 680px;
+  min-height: 480px;
+  display: block;
+}
+
+#root {
+  width: 680px;
+  height: 480px;
+  margin: 0;
+  padding: 0;
+  display: block;
+}
