@@ -20,8 +20,14 @@ export function getSelectedText(): { text: string; range: Range | null } {
 }
 
 export function isBlock(el: HTMLElement): boolean {
-  const d = getComputedStyle(el).display
-  return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || el.tagName === 'P' || /^H[1-6]$/.test(el.tagName)
+  const tag = el.tagName
+  // 表格相关标签始终视为块，便于以 td/th 为翻译单元
+  if (tag === 'TD' || tag === 'TH' || tag === 'TR' || tag === 'TABLE' || tag === 'THEAD' || tag === 'TBODY' || tag === 'TFOOT' || tag === 'CAPTION' || tag === 'COLGROUP' || tag === 'COL') return true
+  try {
+    const d = getComputedStyle(el).display
+    if (d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || (typeof d === 'string' && d.startsWith('table'))) return true
+  } catch {}
+  return tag === 'P' || /^H[1-6]$/.test(tag) || tag === 'LI' || tag === 'BLOCKQUOTE' || tag === 'PRE' || tag === 'CODE' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'MAIN'
 }
 
 function shouldExcludeNode(el: Element, excludeSel: string): boolean {
@@ -51,14 +57,23 @@ function scoreBlock(el: HTMLElement): number {
   if (tag === 'P') tagScore = 0
   else if (/^H[1-6]$/.test(tag)) tagScore = 1
   else if (tag === 'LI' || tag === 'BLOCKQUOTE' || tag === 'PRE' || tag === 'CODE') tagScore = 2
-  else if (tag === 'TD' || tag === 'TH') tagScore = 3
+  else if (tag === 'TD' || tag === 'TH') tagScore = 2.5
+  else if (tag === 'TR') tagScore = 4
+  else if (tag === 'TABLE' || tag === 'THEAD' || tag === 'TBODY' || tag === 'TFOOT' || tag === 'CAPTION') tagScore = 6
   else if (tag === 'DIV') tagScore = 5
   else tagScore = 8
   const txtLen = (el.textContent || '').trim().length
   let lenPenalty = 0
-  if (txtLen < 15) lenPenalty = 20
-  else if (txtLen > 800) lenPenalty = (txtLen - 800) / 100
-  else if (txtLen > 300) lenPenalty = (txtLen - 300) / 200
+  // 表格单元格短文本常见，不应重罚
+  if (tag === 'TD' || tag === 'TH') {
+    if (txtLen < 2) lenPenalty = 20
+    else if (txtLen > 800) lenPenalty = (txtLen - 800) / 100
+    else if (txtLen > 300) lenPenalty = (txtLen - 300) / 200
+  } else {
+    if (txtLen < 15) lenPenalty = 20
+    else if (txtLen > 800) lenPenalty = (txtLen - 800) / 100
+    else if (txtLen > 300) lenPenalty = (txtLen - 300) / 200
+  }
   const rect = el.getBoundingClientRect()
   const area = rect.width * rect.height
   const areaPenalty = area > 500000 ? 10 : area < 2000 ? 5 : 0
@@ -73,7 +88,9 @@ export function findBestBlockForRange(range: Range, excludeSel = ''): HTMLElemen
   while (el && el !== document.body) {
     if (isBlock(el) && !shouldExcludeNode(el, excludeSel)) {
       const len = (el.textContent || '').trim().length
-      if (len >= 10 && len <= 2000) candidates.push(el)
+      const isCell = el.tagName === 'TD' || el.tagName === 'TH'
+      const minLen = isCell ? 2 : 10
+      if (len >= minLen && len <= 2000) candidates.push(el)
     }
     el = el.parentElement
   }
@@ -98,7 +115,9 @@ export function findBestBlockAtPoint(x: number, y: number, excludeSel = ''): HTM
       const rect = el.getBoundingClientRect()
       if (x >= rect.left - 2 && x <= rect.right + 2 && y >= rect.top - 2 && y <= rect.bottom + 2) {
         const len = (el.textContent || '').trim().length
-        if (len >= 10 && len <= 3000) candidates.push(el)
+        const isCell = el.tagName === 'TD' || el.tagName === 'TH'
+        const minLen = isCell ? 2 : 10
+        if (len >= minLen && len <= 3000) candidates.push(el)
       }
     }
     el = el.parentElement
@@ -266,9 +285,10 @@ export function getBlocksInRange(range: Range, excludeSel = ''): HTMLElement[] {
  acceptNode(node) {
  const el = node as HTMLElement
  if (!isBlock(el)) return NodeFilter.FILTER_SKIP
- if (shouldExcludeNode(el, excludeSel)) return NodeFilter.FILTER_REJECT
  const len = (el.textContent || '').trim().length
- if (len < 10) return NodeFilter.FILTER_SKIP
+ const isCell = el.tagName === 'TD' || el.tagName === 'TH'
+ const minLen = isCell ? 2 : 10
+ if (len < minLen) return NodeFilter.FILTER_SKIP
  // intersects?
  try { if (!range.intersectsNode(el)) return NodeFilter.FILTER_SKIP } catch { return NodeFilter.FILTER_SKIP }
  return NodeFilter.FILTER_ACCEPT
@@ -478,7 +498,9 @@ export function expandContainerToParagraphs(container: HTMLElement, excludeSel =
       if (!isBlock(el)) return NodeFilter.FILTER_SKIP
       if (shouldExcludeNode(el, excludeSel)) return NodeFilter.FILTER_REJECT
       const len = getBlockText(el).length
-      if (len < 10) return NodeFilter.FILTER_SKIP
+      const isCell = el.tagName === 'TD' || el.tagName === 'TH'
+      const minLen = isCell ? 2 : 10
+      if (len < minLen) return NodeFilter.FILTER_SKIP
       try {
         const style = getComputedStyle(el)
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return NodeFilter.FILTER_SKIP

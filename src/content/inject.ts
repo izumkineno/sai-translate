@@ -232,31 +232,41 @@ export function updateCard(anchor: HTMLElement, status: CardStatus, text: string
     observe(anchor, newHost)
   }
 }
-
 function placeAfter(anchor: HTMLElement, host: HTMLElement) {
-  const prev = anchor.nextElementSibling as HTMLElement | null
-  if (prev && prev.getAttribute(CARD_ATTR) === '1') {
-    prev.replaceWith(host)
-    // if prev was tracked, update map (caller handles)
+  const isCell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
+  if (isCell) {
+    const last = anchor.lastElementChild as HTMLElement | null
+    if (last && last.getAttribute(CARD_ATTR) === '1') {
+      last.replaceWith(host)
+    } else {
+      anchor.appendChild(host)
+    }
   } else {
-    anchor.after(host)
+    const prev = anchor.nextElementSibling as HTMLElement | null
+    if (prev && prev.getAttribute(CARD_ATTR) === '1') {
+      prev.replaceWith(host)
+    } else {
+      anchor.after(host)
+    }
   }
   cardMap.set(anchor, host)
   try { updateCloseAllButton() } catch {}
 }
 
 function observe(anchor: HTMLElement, host: HTMLElement) {
-  const parent = anchor.parentElement
+  const isCell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
+  const parent = isCell ? anchor : anchor.parentElement
   if (!parent) return
   const obs = new MutationObserver(() => {
-    // if host removed by SPA rerender, re-inject after 200ms
     if (!host.isConnected) {
       setTimeout(() => {
         if (anchor.isConnected && !host.isConnected) {
-          // only if no newer card for same anchor
           const cur = cardMap.get(anchor)
           if (cur === host) {
-            try { anchor.after(host) } catch {}
+            try {
+              if (isCell) anchor.appendChild(host)
+              else anchor.after(host)
+            } catch {}
           }
         }
       }, 200)
