@@ -1,0 +1,365 @@
+// Hover preselection — visual only, no LLM
+// Shows sentence-level highlight (Highlight API) + block icon/dashed, fully customizable
+
+import { findBestBlockAtPoint, findBestBlockForRange, getSentenceRangeAtPoint } from './utils/selection'
+
+type HoverCfg = {
+  enabled: boolean
+  highlight: boolean
+  icon: boolean
+  dashed: boolean
+  highlightColor: string
+  dashedColor: string
+  dashedWidth: number
+  iconPosition: 'top-right' | 'bottom-right'
+  excludeSelectors: string
+}
+
+const DEFAULT: HoverCfg = {
+  enabled: true,
+  highlight: true,
+  icon: true,
+  dashed: true,
+  highlightColor: '#fef08a',
+  dashedColor: '#e5e7eb',
+  dashedWidth: 1,
+  iconPosition: 'top-right',
+  excludeSelectors: 'pre,code,[contenteditable]',
+}
+
+let cfg: HoverCfg = { ...DEFAULT }
+let currentAnchor: HTMLElement | null = null
+let currentSentenceRange: Range | null = null
+let currentSentenceText: string | null = null
+let iconEl: HTMLElement | null = null
+let prevBlockStyle: { bg: string; outline: string } | null = null
+
+function shouldExclude(el: Element): boolean {
+  const sel = cfg.excludeSelectors.trim()
+  if (!sel) return false
+  try { return !!el.closest(sel) } catch { return false }
+}
+
+function findAnchorFromPoint(target: Element | null, x: number, y: number): HTMLElement | null {
+  if (!target) return null
+  if (shouldExclude(target)) return null
+  // Use best block at point
+  const best = findBestBlockAtPoint(x, y, cfg.excludeSelectors)
+  if (best) return best
+  // fallback simple
+  let el = target as HTMLElement
+  // walk up to block
+  const isBlock = (e: HTMLElement) => {
+    const d = getComputedStyle(e).display
+    return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || e.tagName === 'P' || /^H[1-6]$/.test(e.tagName)
+  }
+  while (el && el !== document.body && !isBlock(el)) el = el.parentElement as HTMLElement
+  if (!el || el === document.body) return null
+  if (shouldExclude(el)) return null
+  const txt = (el.textContent || '').trim()
+  if (txt.length < 2) return null
+  return el
+}
+
+function findAnchorFromRange(): HTMLElement | null {
+ const sel = window.getSelection()
+ if (!sel || !sel.rangeCount || sel.isCollapsed) return null
+ try {
+ const range = sel.getRangeAt(0)
+ const best = findBestBlockForRange(range, cfg.excludeSelectors)
+ if (best) return best
+ // fallback to first block ancestor
+ let node: Node | null = range.commonAncestorContainer
+ if (node.nodeType === Node.TEXT_NODE) node = (node as Text).parentElement
+ let el = node as HTMLElement | null
+ const isBlockLocal = (e: HTMLElement) => {
+ const d = getComputedStyle(e).display
+ return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || e.tagName === 'P' || /^H[1-6]$/.test(e.tagName)
+ }
+ while (el && el !== document.body && !isBlockLocal(el)) el = el.parentElement
+ return el && el !== document.body ? el : null
+ } catch {
+ return null
+ }
+}
+
+function ensureIcon(): HTMLElement {
+  if (iconEl) return iconEl
+  const el = document.createElement('div')
+  el.dataset.saiHoverIcon = '1'
+  el.style.cssText = `
+    position:absolute; width:22px; height:22px; border-radius:6px;
+    background:#111827; color:#fff; display:flex; align-items:center; justify-content:center;
+    font-size:12px; line-height:1; box-shadow:0 2px 8px rgba(0,0,0,.2);
+    cursor:pointer; z-index:2147483645; pointer-events:auto;
+  `
+  el.textContent = '译'
+  el.title = '按 Alt+Shift+T 翻译此句/块'
+  el.addEventListener('click', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    window.dispatchEvent(new CustomEvent('sai:iconClick', { detail: { anchor: currentAnchor, sentence: currentSentenceText, range: currentSentenceRange } }))
+  })
+  iconEl = el
+  return el
+}
+
+function ensureHighlightStyle() {
+ if (document.getElementById('sai-highlight-style')) return
+ const s = document.createElement('style')
+ s.id = 'sai-highlight-style'
+ s.textContent = `::highlight(sai-sentence) { background-color: ${cfg.highlightColor}; }`
+ document.head.appendChild(s)
+}
+
+function applySentenceHighlight(range: Range | null) {
+ clearSentenceHighlight()
+ if (!range || !cfg.highlight) return
+ try {
+ const HL = (globalThis as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight
+ const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
+ if (typeof HL === 'function' && highlights) {
+ ensureHighlightStyle()
+ const styleEl = document.getElementById('sai-highlight-style')
+ if (styleEl) styleEl.textContent = `::highlight(sai-sentence) { background-color: ${cfg.highlightColor}; }`
+ const h = new (HL as unknown as new (r: Range) => unknown)(range)
+ highlights.set('sai-sentence', h as never)
+ return
+ }
+ } catch {}
+}
+
+function clearSentenceHighlight() {
+ try {
+ const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
+ if (highlights) highlights.delete('sai-sentence')
+ } catch {}
+}
+
+function applyBlockHighlight(anchor: HTMLElement) {
+  if (!cfg.highlight && !cfg.dashed) return
+  prevBlockStyle = { bg: anchor.style.backgroundColor, outline: anchor.style.outline }
+  // If sentence highlight is active, skip block bg to avoid double
+  if (currentSentenceRange && cfg.highlight) {
+    // only dashed for block when sentence highlighted
+    if (cfg.dashed) {
+      anchor.style.outline = `${cfg.dashedWidth}px dashed ${cfg.dashedColor}`
+      anchor.style.outlineOffset = '2px'
+    }
+    return
+  }
+  if (cfg.highlight) {
+    anchor.style.backgroundColor = cfg.highlightColor
+    anchor.style.transition = 'background-color .15s'
+  }
+  if (cfg.dashed) {
+    anchor.style.outline = `${cfg.dashedWidth}px dashed ${cfg.dashedColor}`
+    anchor.style.outlineOffset = '2px'
+  }
+}
+
+function removeBlockHighlight(anchor: HTMLElement) {
+  if (prevBlockStyle) {
+    anchor.style.backgroundColor = prevBlockStyle.bg
+    anchor.style.outline = prevBlockStyle.outline
+    prevBlockStyle = null
+  } else {
+    anchor.style.backgroundColor = ''
+    anchor.style.outline = ''
+    anchor.style.outlineOffset = ''
+  }
+  if (anchor.dataset.saiOrigPosition !== undefined) {
+    anchor.style.position = anchor.dataset.saiOrigPosition
+    delete anchor.dataset.saiOrigPosition
+  }
+}
+
+function showIconFor(anchor: HTMLElement) {
+  if (!cfg.icon) return
+  const icon = ensureIcon()
+  const pos = getComputedStyle(anchor).position
+  if (pos === 'static') {
+    anchor.dataset.saiOrigPosition = anchor.style.position || ''
+    anchor.style.position = 'relative'
+  }
+  icon.style.position = 'absolute'
+  if (cfg.iconPosition === 'top-right') {
+    icon.style.top = '6px'
+    icon.style.right = '6px'
+    icon.style.bottom = ''
+  } else {
+    icon.style.bottom = '6px'
+    icon.style.right = '6px'
+    icon.style.top = ''
+  }
+  if (icon.parentElement !== anchor) anchor.appendChild(icon)
+}
+
+function hideIcon() {
+  if (iconEl && iconEl.parentElement) iconEl.remove()
+}
+
+function setCurrentByPoint(x: number, y: number, target: Element | null) {
+  const anchor = findAnchorFromPoint(target, x, y)
+  if (currentAnchor === anchor && anchor !== null) {
+    // same block, but sentence may differ — update sentence highlight
+    const sent = getSentenceRangeAtPoint(x, y)
+    if (sent && sent.block === anchor) {
+      if (sent.sentence !== currentSentenceText) {
+        currentSentenceRange = sent.range
+        currentSentenceText = sent.sentence
+        applySentenceHighlight(sent.range)
+      }
+    } else if (!sent && currentSentenceRange) {
+      clearSentenceHighlight()
+      currentSentenceRange = null
+      currentSentenceText = null
+      // restore block highlight if needed
+      if (anchor && !prevBlockStyle) applyBlockHighlight(anchor)
+    }
+    return
+  }
+  // different anchor — clear previous
+  if (currentAnchor) {
+    clearSentenceHighlight()
+    removeBlockHighlight(currentAnchor)
+    hideIcon()
+    currentSentenceRange = null
+    currentSentenceText = null
+  }
+  currentAnchor = anchor
+  if (anchor) {
+    // Try sentence-level highlight at point
+    const sent = getSentenceRangeAtPoint(x, y)
+    if (sent && sent.block === anchor && sent.sentence.length >= 2 && sent.sentence.length < 600) {
+      currentSentenceRange = sent.range
+      currentSentenceText = sent.sentence
+      applySentenceHighlight(sent.range)
+      // also apply dashed for block context
+      applyBlockHighlight(anchor)
+    } else {
+      currentSentenceRange = null
+      currentSentenceText = null
+      applyBlockHighlight(anchor)
+    }
+    showIconFor(anchor)
+  } else {
+    clearSentenceHighlight()
+  }
+}
+
+export function getCurrentAnchor(): HTMLElement | null {
+ const sel = window.getSelection()
+ if (sel && sel.rangeCount && !sel.isCollapsed) {
+ try {
+ const best = (findAnchorFromRange() as HTMLElement | null)
+ if (best) return best
+ } catch {}
+ }
+ return currentAnchor
+}
+
+export function getHoverSentence(): string | null {
+  return currentSentenceText
+}
+
+export function getHoverSentenceRange(): Range | null {
+  return currentSentenceRange
+}
+
+export function getHoverConfig(): HoverCfg {
+  return { ...cfg }
+}
+
+async function loadCfg() {
+  try {
+    const keys = [
+      'sai_hover_enabled',
+      'sai_hover_highlight',
+      'sai_hover_icon',
+      'sai_hover_dashed',
+      'sai_hover_highlight_color',
+      'sai_hover_dashed_color',
+      'sai_hover_dashed_width',
+      'sai_hover_icon_position',
+      'sai_hover_exclude_selectors',
+    ] as const
+    const raw = await chrome.storage.local.get(keys as unknown as string[])
+    if (typeof raw['sai_hover_enabled'] === 'boolean') cfg.enabled = raw['sai_hover_enabled'] as boolean
+    if (typeof raw['sai_hover_highlight'] === 'boolean') cfg.highlight = raw['sai_hover_highlight'] as boolean
+    if (typeof raw['sai_hover_icon'] === 'boolean') cfg.icon = raw['sai_hover_icon'] as boolean
+    if (typeof raw['sai_hover_dashed'] === 'boolean') cfg.dashed = raw['sai_hover_dashed'] as boolean
+    if (typeof raw['sai_hover_highlight_color'] === 'string') cfg.highlightColor = raw['sai_hover_highlight_color'] as string
+    if (typeof raw['sai_hover_dashed_color'] === 'string') cfg.dashedColor = raw['sai_hover_dashed_color'] as string
+    if (typeof raw['sai_hover_dashed_width'] === 'number') cfg.dashedWidth = raw['sai_hover_dashed_width'] as number
+    if (raw['sai_hover_icon_position'] === 'top-right' || raw['sai_hover_icon_position'] === 'bottom-right') cfg.iconPosition = raw['sai_hover_icon_position'] as HoverCfg['iconPosition']
+    if (typeof raw['sai_hover_exclude_selectors'] === 'string') cfg.excludeSelectors = raw['sai_hover_exclude_selectors'] as string
+    // update highlight style color
+    const styleEl = document.getElementById('sai-highlight-style')
+    if (styleEl) styleEl.textContent = `::highlight(sai-sentence) { background-color: ${cfg.highlightColor}; }`
+  } catch {}
+}
+
+export function initHover() {
+  void loadCfg()
+  chrome.storage.onChanged.addListener((changes) => {
+    let need = false
+    for (const k of Object.keys(changes)) if (k.startsWith('sai_hover')) { need = true; break }
+    if (need) void loadCfg().then(() => {
+      if (currentAnchor) {
+        // re-apply highlights with new colors
+        if (currentSentenceRange) applySentenceHighlight(currentSentenceRange)
+        else if (cfg.enabled) applyBlockHighlight(currentAnchor)
+        if (cfg.icon) showIconFor(currentAnchor); else hideIcon()
+      }
+    })
+  })
+
+  let lastMove = 0
+  let lastX = 0, lastY = 0
+  document.addEventListener('mousemove', (e) => {
+    if (!cfg.enabled) {
+      if (currentAnchor) {
+        clearSentenceHighlight()
+        removeBlockHighlight(currentAnchor)
+        hideIcon()
+        currentAnchor = null
+        currentSentenceRange = null
+        currentSentenceText = null
+      }
+      return
+    }
+    const now = Date.now()
+    if (now - lastMove < 80) {
+      // throttle but still update if moved > 12px
+      if (Math.abs(e.clientX - lastX) < 12 && Math.abs(e.clientY - lastY) < 12) return
+    }
+    lastMove = now
+    lastX = e.clientX; lastY = e.clientY
+    const target = document.elementFromPoint(e.clientX, e.clientY)
+    if ((e.target as HTMLElement)?.dataset?.saiHoverIcon) return
+    setCurrentByPoint(e.clientX, e.clientY, target)
+  }, { passive: true })
+
+  window.addEventListener('sai:clearHover', () => {
+    if (currentAnchor) {
+      clearSentenceHighlight()
+      removeBlockHighlight(currentAnchor)
+      hideIcon()
+    }
+    currentAnchor = null
+    currentSentenceRange = null
+    currentSentenceText = null
+  })
+}
+
+export function clearHover() {
+  if (currentAnchor) {
+    clearSentenceHighlight()
+    removeBlockHighlight(currentAnchor)
+    hideIcon()
+  }
+  currentAnchor = null
+  currentSentenceRange = null
+  currentSentenceText = null
+}
