@@ -27,6 +27,7 @@ const DEFAULT: HoverCfg = {
   excludeSelectors: 'pre,code,[contenteditable]',
 }
 
+let cfgLoaded = false
 let cfg: HoverCfg = { ...DEFAULT }
 let currentAnchor: HTMLElement | null = null
 let currentSentenceRange: Range | null = null
@@ -294,10 +295,10 @@ async function loadCfg() {
     if (typeof raw['sai_hover_dashed_width'] === 'number') cfg.dashedWidth = raw['sai_hover_dashed_width'] as number
     if (raw['sai_hover_icon_position'] === 'top-right' || raw['sai_hover_icon_position'] === 'bottom-right') cfg.iconPosition = raw['sai_hover_icon_position'] as HoverCfg['iconPosition']
     if (typeof raw['sai_hover_exclude_selectors'] === 'string') cfg.excludeSelectors = raw['sai_hover_exclude_selectors'] as string
-    // update highlight style color
     const styleEl = document.getElementById('sai-highlight-style')
     if (styleEl) styleEl.textContent = `::highlight(sai-sentence) { background-color: ${cfg.highlightColor}; }`
   } catch {}
+  cfgLoaded = true
 }
 
 export function initHover() {
@@ -307,10 +308,19 @@ export function initHover() {
     for (const k of Object.keys(changes)) if (k.startsWith('sai_hover')) { need = true; break }
     if (need) void loadCfg().then(() => {
       if (currentAnchor) {
-        // re-apply highlights with new colors
-        if (currentSentenceRange) applySentenceHighlight(currentSentenceRange)
-        else if (cfg.enabled) applyBlockHighlight(currentAnchor)
-        if (cfg.icon) showIconFor(currentAnchor); else hideIcon()
+        // re-apply highlights with new colors / respect new toggles
+        if (!cfg.enabled) {
+          clearSentenceHighlight()
+          removeBlockHighlight(currentAnchor)
+          hideIcon()
+        } else {
+          if (currentSentenceRange && cfg.highlight) applySentenceHighlight(currentSentenceRange)
+          else clearSentenceHighlight()
+          if (cfg.dashed) applyBlockHighlight(currentAnchor); else removeBlockHighlight(currentAnchor)
+          if (cfg.icon) showIconFor(currentAnchor); else hideIcon()
+        }
+      } else if (cfg.enabled) {
+        // no anchor, nothing to re-apply
       }
     })
   })
@@ -318,6 +328,8 @@ export function initHover() {
   let lastMove = 0
   let lastX = 0, lastY = 0
   document.addEventListener('mousemove', (e) => {
+    // 关键修复：配置未加载完成前不展示任何 hover 态，避免新页闪现背景/高亮/图标
+    if (!cfgLoaded) return
     if (!cfg.enabled) {
       if (currentAnchor) {
         clearSentenceHighlight()
@@ -331,14 +343,13 @@ export function initHover() {
     }
     const now = Date.now()
     if (now - lastMove < 80) {
-      // throttle but still update if moved > 12px
       if (Math.abs(e.clientX - lastX) < 12 && Math.abs(e.clientY - lastY) < 12) return
     }
     lastMove = now
     lastX = e.clientX; lastY = e.clientY
-    const target = document.elementFromPoint(e.clientX, e.clientY)
+    const target = document.elementFromPoint(e.clientX, e.clientY) as Element | null
     if ((e.target as HTMLElement)?.dataset?.saiHoverIcon) return
-    setCurrentByPoint(e.clientX, e.clientY, target)
+    setCurrentByPoint(e.clientX, e.clientY, target as HTMLElement | null)
   }, { passive: true })
 
   window.addEventListener('sai:clearHover', () => {
@@ -352,7 +363,6 @@ export function initHover() {
     currentSentenceText = null
   })
 }
-
 export function clearHover() {
   if (currentAnchor) {
     clearSentenceHighlight()

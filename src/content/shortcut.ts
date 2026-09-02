@@ -1,7 +1,4 @@
-// Shortcut handling — dual track: commands (via background) + Alt+Q content
-// 沉浸式风格：当锚点为多段落父容器时，展开为子段并通过限流队列逐个翻译
-
-import { getCurrentAnchor, getHoverSentence } from './hover'
+import { getCurrentAnchor } from './hover'
 import { injectLoading, removeAll, hasCard, removeCard, updateCard } from './inject'
 import {
   expandContainerToParagraphs,
@@ -96,18 +93,18 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
 
 const QUEUE_CONCURRENCY = 3
 function getTextForQueuedBlock(b: HTMLElement, range: Range | null): string {
-  // 裸文本 marker：优先取 dataset 存储的原始文本
-  if ((b as HTMLElement & { dataset: DOMStringMap }).dataset?.saiUnwrapped === '1') {
-    const v = (b as HTMLElement & { dataset: DOMStringMap }).dataset.saiText
-    if (typeof v === 'string' && v.trim()) {
-      // 若有选区范围，仍尝试用 range 相交文本（对 marker 可能无意义），优先返回 marker 文本
-      if (range) {
-        try {
-          const t = getSelectedTextForBlock(b, range)
-          if (t && t.trim()) return t
-        } catch {}
-      }
-      return v.trim()
+  // 核心修复：含 <a>/<em>/inline 的 <p> 等块，任何部分命中即整段翻译
+  // 原逻辑用 range 相交文本，导致 <em>/<a> 边界处只取到片段，表现"只有全选才完整"
+  const inlineRich = b.querySelector?.('a, em, i, b, strong, span, code, u, s, mark, small, cite, q, abbr')
+  if (inlineRich) {
+    const full = getBlockText(b).trim()
+    if (full && isValidText(full)) return full
+  }
+  if (b.tagName === 'P' || b.tagName === 'LI' || /^H[1-6]$/.test(b.tagName) || b.tagName === 'BLOCKQUOTE') {
+    const degree = (b.childNodes.length > 1) ? 1 : 0
+    if (degree) {
+      const full = getBlockText(b).trim()
+      if (full && full.length > 80) return full
     }
   }
   if (range) {
@@ -118,7 +115,6 @@ function getTextForQueuedBlock(b: HTMLElement, range: Range | null): string {
   }
   return getBlockText(b)
 }
-
 /**
  * 将一批 block 通过限流队列逐个翻译（并发 QUEUE_CONCURRENCY）
  * 每个 block 独立卡片，类似沉浸式翻译的段落级双语
@@ -188,14 +184,15 @@ function handleTranslateSelection() {
           void translateBlocksQueue(targets, (b) => getTextForQueuedBlock(b, range))
           return
         }
-        // 单块：若为部分选中则用相交文本，否则用整体 text
+        // 单块：含内联标记的段一律整段翻译，修复"<a>/<em> 边界截断"现象
         const t = getTextForQueuedBlock(single, range) || text
-        if (t && isValidText(t)) { void doTranslate(t, single); return }
-      }
-      // blocks 为空时，尝试用 anchor 展开（覆盖 range 为 selectNode(container) 的情况）
-      const anchor = findBlockAnchor(range)
-      if (anchor) {
-        const expanded = expandContainerToParagraphs(anchor)
+        // 若仍为片段且段内有 <a>/<em>，强制用全段兜底
+        let finalT = t
+        if (single.querySelector?.('a,em') && t && getBlockText(single).length > t.length + 20) {
+          const full = getBlockText(single).trim()
+          if (isValidText(full)) finalT = full
+        }
+        if (finalT && isValidText(finalT)) { void doTranslate(finalT, single); return }
         if (expanded.length > 1) {
           const filtered = expanded.filter((child: HTMLElement) => {
             try { return (range as Range).intersectsNode(child) } catch { return true }
@@ -236,22 +233,18 @@ function handleTranslateSelection() {
   }
 
   // 3) 无选区：悬停锚点（沉浸式核心：hover 到父容器时展开为子段逐个译）
+  // 已取消"自动截一句"逻辑：hover 整段翻译，修复"hover一段却只译一句"问题
+  // 视觉上的句级高亮(getSentenceRangeAtPoint)仍保留，仅作预选提示，不影响翻译文本
   const hoverAnchor = getCurrentAnchor()
-  const hoverSentence = getHoverSentence()
   if (hoverAnchor) {
     const expanded = expandContainerToParagraphs(hoverAnchor)
     if (expanded.length > 1) {
       void translateBlocksQueue(expanded, (b) => getBlockText(b))
       return
     }
-    if (hoverSentence && hoverSentence.trim().length >= 2) {
-      void doTranslate(hoverSentence, hoverAnchor)
-      return
-    }
-    const hoverText = (hoverAnchor.textContent || '').trim().slice(0, 4000)
-    if (hoverText) { void doTranslate(hoverText, hoverAnchor); return }
+    const hoverText = getBlockText(hoverAnchor).trim().slice(0, 4000) || (hoverAnchor.textContent || '').trim().slice(0, 4000)
+    if (hoverText && isValidText(hoverText)) { void doTranslate(hoverText, hoverAnchor); return }
   }
-
   // 4) 纯文本回退（如 input/textarea 选区无 range）
   if (text) {
     let anchor: HTMLElement | null = null
@@ -301,16 +294,14 @@ export function initShortcut() {
     const detail = (ev as CustomEvent).detail as { anchor: HTMLElement | null; sentence?: string } | undefined
     const anchor = detail?.anchor || getCurrentAnchor()
     if (!anchor) return
-    // 图标点击同样遵循容器展开规则
+    // 图标点击同样遵循容器展开规则，取消"自动一句"：一律整段
     const expanded = expandContainerToParagraphs(anchor)
     if (expanded.length > 1) {
       void translateBlocksQueue(expanded, (b) => getBlockText(b))
       return
     }
-    const sent = detail?.sentence || getHoverSentence()
-    if (sent && sent.trim().length >= 2) { void doTranslate(sent, anchor); return }
-    const txt = (anchor.textContent || '').trim().slice(0, 4000)
-    if (txt) void doTranslate(txt, anchor)
+    const txt = getBlockText(anchor).trim().slice(0, 4000) || (anchor.textContent || '').trim().slice(0, 4000)
+    if (txt && isValidText(txt)) void doTranslate(txt, anchor)
   })
   chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse: (r: unknown) => void) => {
     if (!msg || typeof msg !== 'object') return undefined
