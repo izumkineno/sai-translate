@@ -21,6 +21,28 @@ export default defineManifest({
     },
     default_popup: 'src/popup/index.html',
   },
-  permissions: ['storage'],
+  permissions: ['storage', 'activeTab', 'tabs'],
   host_permissions: ['https://*/*', 'http://*/*'],
+  background: {
+    service_worker: 'src/background/index.ts',
+    type: 'module',
+  },
+  content_scripts: [
+    {
+      js: ['src/content/main.ts'],
+      matches: ['<all_urls>'],
+      run_at: 'document_idle',
+      all_frames: false,
+    },
+  ],
+  commands: {
+    'translate-selection': {
+      suggested_key: { default: 'Alt+Shift+T', mac: 'Alt+Shift+T' },
+      description: '翻译选中/悬停块并行下展示',
+    },
+    'toggle-inline': {
+      suggested_key: { default: 'Alt+Shift+Y', mac: 'Alt+Shift+Y' },
+      description: '显示/隐藏译文',
+    },
+  },
 })

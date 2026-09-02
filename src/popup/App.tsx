@@ -1,17 +1,32 @@
 import { createSignal, Show } from 'solid-js'
 import ModelTranslate from './pages/ModelTranslate'
 import Settings from './pages/Settings'
+import ShortcutHoverSettings from './pages/ShortcutHoverSettings'
 import './App.css'
 
-type NavKey = 'translate' | 'config'
+type NavKey = 'translate' | 'config' | 'shortcut-hover'
 
 export default function App() {
   const [active, setActive] = createSignal<NavKey>('translate')
+  const [closing, setClosing] = createSignal(false)
+  const onCloseAllGlobal = async () => {
+    setClosing(true)
+    try {
+      // 经 background 广播到所有标签页，兼容单页直连回退
+      try { await chrome.runtime.sendMessage({ type: 'SAI_CLOSE_ALL' }) } catch {}
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+        const tab = tabs[0]
+        if (tab?.id != null) await chrome.tabs.sendMessage(tab.id, { type: 'SAI_CLOSE_ALL' }).catch(() => {})
+      } catch {}
+    } finally { setTimeout(() => setClosing(false), 800) }
+  }
+
 
   return (
     <div class="n-layout has-sider">
       {/* Sider — Naive n-layout-sider + n-menu: 独立 tabs */}
-      <aside class="n-layout-sider">
+      <aside class="n-layout-sider" style={{ display: 'flex', 'flex-direction': 'column', 'justify-content': 'space-between' }}>
         <nav class="n-menu" aria-label="导航">
           <button
             class={`n-menu-item ${active() === 'translate' ? 'n-menu-item--active' : ''}`}
@@ -44,9 +59,29 @@ export default function App() {
             </span>
             模型配置
           </button>
-        </nav>
-      </aside>
 
+          <button
+            class={`n-menu-item ${active() === 'shortcut-hover' ? 'n-menu-item--active' : ''}`}
+            onClick={() => setActive('shortcut-hover')}
+            type="button"
+          >
+            <span class="n-menu-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="12" rx="2" />
+                <path d="M8 16l-2 4 4-1" />
+                <path d="M10 8h4" />
+                <path d="M12 8v4" />
+              </svg>
+            </span>
+            快捷键/Hover
+          </button>
+        </nav>
+        <div style={{ padding: '12px', 'border-top': '1px solid var(--n-border-color, #eee)', 'margin-top': 'auto' }}>
+          <button class="n-button n-button--ghost" style={{ width: '100%', 'font-size': '12px' }} type="button" onClick={onCloseAllGlobal} disabled={closing()}>
+            {closing() ? '关闭中…' : '🗑 关闭全部译文'}
+          </button>
+        </div>
+      </aside>
       {/* Content — independent tabs */}
       <main class="n-layout-content">
         <Show when={active() === 'translate'}>
@@ -54,6 +89,9 @@ export default function App() {
         </Show>
         <Show when={active() === 'config'}>
           <Settings />
+        </Show>
+        <Show when={active() === 'shortcut-hover'}>
+          <ShortcutHoverSettings />
         </Show>
       </main>
     </div>

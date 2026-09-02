@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { activeModelId, models, setActiveModel, setActiveModelForSource } from '../store/models'
 import { loadDraft, saveDraft } from '../store/draft'
-
+import { buildChatBody, extractContent } from '@/shared/translate'
 export default function ModelTranslate() {
   const [input, setInput] = createSignal('')
   const [output, setOutput] = createSignal('')
@@ -72,41 +72,7 @@ export default function ModelTranslate() {
  const base = m.baseUrl.replace(/\/$/, '')
  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
  if (m.apiKey.trim()) headers['Authorization'] = `Bearer ${m.apiKey.trim()}`
- // hy-mt2 专用：显式附加 target 语言，避免仅靠 system 指令被 Hy 忽略
- const isHy = /hy/i.test(m.activeModel)
- const toHyTarget = (t: string, src: string): string => {
- if (t === '中文') return 'Chinese'
- if (t === 'English') return 'English'
- if (t === '日本語') return 'Japanese'
- if (t === '한국어') return 'Korean'
- if (t === 'Français') return 'French'
- if (t === 'Deutsch') return 'German'
- if (t === 'Auto') return /[\u4e00-\u9fff]/.test(src) ? 'English' : 'Chinese'
- return t
- }
- const hyTarget = isHy ? toHyTarget(target(), text) : ''
- const modelForRequest = isHy && hyTarget && !m.activeModel.includes(':') ? `${m.activeModel}:${hyTarget}` : m.activeModel
- // 非 hy：system 携带目标语；hy：system 仅作风格约束，目标语由 body 显式字段与 model 后缀承载
- const sys = isHy
- ? 'You are a professional translator. Only output the translation, no explanation.'
- : target() === 'Auto'
- ? 'You are a professional translator. Detect the source language and translate to the other language: if the text is Chinese, translate to English; otherwise translate to Chinese. Only output the translation, no explanation.'
- : `You are a professional translator. Translate the following text to ${target()}. Only output the translation, no explanation.`
- const body: Record<string, unknown> = {
- model: modelForRequest,
- messages: [
- { role: 'system', content: sys },
- { role: 'user', content: text },
- ],
- temperature: 0.3,
- stream: false,
- }
- if (isHy && hyTarget) {
- // Hy 侧优先读取 body.target_language / body.language，其次 model:后缀；system 不再解析
- body['target_language'] = hyTarget
- body['language'] = hyTarget
- body['target_lang'] = hyTarget
- }
+ const { body } = buildChatBody(m.activeModel, target(), text)
  const res = await fetch(`${base}/chat/completions`, {
  method: 'POST',
  headers,
@@ -247,18 +213,3 @@ export default function ModelTranslate() {
   )
 }
 
-function extractContent(json: unknown): string {
-  if (!json || typeof json !== 'object') return ''
-  const obj = json as Record<string, unknown>
-  const choices = obj['choices']
-  if (Array.isArray(choices) && choices[0] && typeof choices[0] === 'object') {
-    const first = choices[0] as Record<string, unknown>
-    const msg = first['message'] as Record<string, unknown> | undefined
-    if (msg && typeof msg['content'] === 'string') return msg['content'].trim()
-    if (typeof first['text'] === 'string') return (first['text'] as string).trim()
-    if (typeof first['content'] === 'string') return (first['content'] as string).trim()
-  }
-  if (typeof obj['content'] === 'string') return (obj['content'] as string).trim()
-  if (typeof obj['text'] === 'string') return (obj['text'] as string).trim()
-  return ''
-}
