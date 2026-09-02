@@ -77,18 +77,60 @@ export type TranslateRes =
   | { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: true; translated: string; model: string }
   | { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: false; error: string }
 
+export function sanitizeHeaders(h: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = { ...h }
+  if (out['Authorization']) out['Authorization'] = 'Bearer [REDACTED]'
+  return out
+}
+
+export function logFetchFailed(context: string, err: unknown, details: Record<string, unknown>) {
+  const e = err instanceof Error ? err : new Error(String(err))
+  const msg = e.message || ''
+  const isFailed = msg.toLowerCase().includes('failed to fetch') || msg.toLowerCase().includes('networkerror') || msg.toLowerCase().includes('load failed')
+  if (!isFailed && !msg.toLowerCase().includes('fetch')) return
+  try {
+    // eslint-disable-next-line no-console
+    console.error(`[sai-translate] ${context} — Failed to fetch (detailed)`, {
+      time: new Date().toISOString(),
+      errorName: e.name,
+      errorMessage: msg,
+      errorStack: e.stack?.slice(0, 2000),
+      online: typeof navigator !== 'undefined' ? navigator.onLine : undefined,
+      location: typeof location !== 'undefined' ? location.href : undefined,
+      ...details,
+    })
+  } catch {}
+}
+
 // helper to call LLM directly (for background, reuses same body building)
 export async function callLLM(baseUrl: string, apiKey: string, model: string, target: string, text: string, signal?: AbortSignal): Promise<string> {
- const base = baseUrl.replace(/\/$/, '')
- const headers: Record<string, string> = { 'Content-Type': 'application/json' }
- if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`
- const { body } = buildChatBody(model, target, text)
- const res = await fetch(`${base}/chat/completions`, {
- method: 'POST',
- headers,
- body: JSON.stringify(body),
- signal,
- })
+  const base = baseUrl.replace(/\/$/, '')
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`
+  const { body } = buildChatBody(model, target, text)
+  const url = `${base}/chat/completions`
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (err) {
+    logFetchFailed('callLLM', err, {
+      url,
+      method: 'POST',
+      baseUrl: base,
+      model,
+      target,
+      textLength: text.length,
+      textPreview: text.slice(0, 80),
+      headers: sanitizeHeaders(headers),
+      bodyPreview: JSON.stringify(body).slice(0, 500),
+    })
+    throw err
+  }
   if (!res.ok) {
     const t = await res.text().catch(() => '')
     let msg = t

@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { loadSettingsDraft, saveSettingsDraft } from '../store/settingsDraft'
+import { logFetchFailed, sanitizeHeaders } from '@/shared/translate'
 import {
   activeModelId,
   addSource,
@@ -174,10 +175,17 @@ export default function Settings() {
  return
  }
  setFetching(true)
+  let _logCtx: Record<string, unknown> | null = null
  try {
  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
  const key = apiKey().trim()
  if (key) headers['Authorization'] = `Bearer ${key}`
+  _logCtx = {
+    url: `${base}/models`,
+    method: 'GET',
+    baseUrl: base,
+    headers: sanitizeHeaders(headers),
+  }
  const res = await fetch(`${base}/models`, { method: 'GET', headers })
  if (!res.ok) {
  const text = await res.text().catch(() => '')
@@ -188,13 +196,14 @@ export default function Settings() {
  if (list.length === 0) throw new Error('未获取到模型列表')
  setAvailableModels(list)
  } catch (err) {
+  try { logFetchFailed('popup:Settings:fetchModels', err, _logCtx ?? { url: `${base}/models`, method: 'GET', baseUrl: base }) } catch {}
  const msg = err instanceof Error ? err.message : '获取失败'
  setFetchError(msg.length > 120 ? `${msg.slice(0, 120)}...` : msg)
  setAvailableModels([])
  } finally {
  setFetching(false)
  }
- }
+}
 
  const onRemoveModelFromSource = async (sourceId: string, modelName: string) => {
  const src = models().find((s) => s.id === sourceId)

@@ -1,8 +1,7 @@
 // MV3 service worker — handles commands + SAI_TRANSLATE
 // No DOM access; only chrome.* + shared/translate
 
-import { callLLM, type TranslateReq, type TranslateRes } from '../shared/translate'
-
+import { callLLM, logFetchFailed, type TranslateReq, type TranslateRes } from '../shared/translate'
 const MODELS_KEY = 'sai_translate_models'
 const ACTIVE_KEY = 'sai_translate_active_model'
 const TARGET_LANG_KEY = 'sai_translate_target_lang'
@@ -247,6 +246,16 @@ chrome.runtime.onMessage.addListener(
         }
       } catch (e) {
         clearTimeout(timeoutId as unknown as number)
+        try {
+          logFetchFailed('background:SAI_TRANSLATE', e, {
+            requestId,
+            senderTabId: sender.tab?.id,
+            senderUrl: (sender.tab as unknown as { url?: string })?.url ?? (sender as unknown as { url?: string }).url,
+            rawTextLength: rawText.length,
+            rawTextPreview: rawText.slice(0, 80),
+            timeoutMs: TIMEOUT_MS,
+          })
+        } catch {}
         const error = mapError(e)
         const errRes: TranslateRes = {
           type: 'SAI_TRANSLATE_RESULT',

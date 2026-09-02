@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { activeModelId, models, setActiveModel, setActiveModelForSource } from '../store/models'
 import { loadDraft, saveDraft } from '../store/draft'
-import { buildChatBody, extractContent } from '@/shared/translate'
+import { buildChatBody, extractContent, logFetchFailed, sanitizeHeaders } from '@/shared/translate'
 export default function ModelTranslate() {
   const [input, setInput] = createSignal('')
   const [output, setOutput] = createSignal('')
@@ -68,11 +68,23 @@ export default function ModelTranslate() {
  setTranslating(true)
  setTerr('')
  setOutput('')
+  let _logCtx: Record<string, unknown> | null = null
  try {
  const base = m.baseUrl.replace(/\/$/, '')
  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
  if (m.apiKey.trim()) headers['Authorization'] = `Bearer ${m.apiKey.trim()}`
  const { body } = buildChatBody(m.activeModel, target(), text)
+  _logCtx = {
+    url: `${base}/chat/completions`,
+    method: 'POST',
+    baseUrl: base,
+    model: m.activeModel,
+    target: target(),
+    textLength: text.length,
+    textPreview: text.slice(0, 80),
+    headers: sanitizeHeaders(headers),
+    bodyPreview: JSON.stringify(body).slice(0, 800),
+  }
  const res = await fetch(`${base}/chat/completions`, {
  method: 'POST',
  headers,
@@ -93,6 +105,7 @@ export default function ModelTranslate() {
  if (!content) throw new Error('未获取到翻译结果')
  setOutput(content)
  } catch (e) {
+  try { logFetchFailed('popup:ModelTranslate', e, _logCtx ?? { target: target(), textLength: text.length, textPreview: text.slice(0, 80), model: m?.activeModel }) } catch {}
  const msg = e instanceof Error ? e.message : '翻译失败'
  setTerr(msg.length > 200 ? `${msg.slice(0, 200)}...` : msg)
  } finally {
