@@ -1,4 +1,5 @@
-import { createSignal, For, Show } from 'solid-js'
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { loadSettingsDraft, saveSettingsDraft } from '../store/settingsDraft'
 import {
   activeModelId,
   addSource,
@@ -28,6 +29,54 @@ export default function Settings() {
  const [availableModels, setAvailableModels] = createSignal<string[]>([])
  const [selectedModels, setSelectedModels] = createSignal<string[]>([])
 
+  // 表单草稿：关闭弹窗后保留，下次打开恢复
+  let draftLoaded = false
+  let saveTimer: number | undefined = undefined
+  onMount(async () => {
+    try {
+      const d = await loadSettingsDraft()
+      if (d) {
+        if (typeof d.name === 'string') setName(d.name)
+        if (typeof d.baseUrl === 'string' && d.baseUrl) setBaseUrl(d.baseUrl)
+        if (typeof d.apiKey === 'string') setApiKey(d.apiKey)
+        if (typeof d.model === 'string') setModel(d.model)
+        if (Array.isArray(d.availableModels)) setAvailableModels(d.availableModels.filter((x) => typeof x === 'string'))
+        if (Array.isArray(d.selectedModels)) setSelectedModels(d.selectedModels.filter((x) => typeof x === 'string'))
+      }
+    } catch {}
+    draftLoaded = true
+  })
+  const scheduleSave = () => {
+    if (!draftLoaded) return
+    clearTimeout(saveTimer)
+    saveTimer = window.setTimeout(() => {
+      void saveSettingsDraft({
+        name: name(),
+        baseUrl: baseUrl(),
+        apiKey: apiKey(),
+        model: model(),
+        availableModels: availableModels(),
+        selectedModels: selectedModels(),
+      })
+    }, 120)
+  }
+  createEffect(() => { name(); scheduleSave() })
+  createEffect(() => { baseUrl(); scheduleSave() })
+  createEffect(() => { apiKey(); scheduleSave() })
+  createEffect(() => { model(); scheduleSave() })
+  createEffect(() => { availableModels(); scheduleSave() })
+  createEffect(() => { selectedModels(); scheduleSave() })
+  onCleanup(() => {
+    clearTimeout(saveTimer)
+    void saveSettingsDraft({
+      name: name(),
+      baseUrl: baseUrl(),
+      apiKey: apiKey(),
+      model: model(),
+      availableModels: availableModels(),
+      selectedModels: selectedModels(),
+    })
+  })
 
  const validate = () => {
  const e: Record<string, string> = {}
