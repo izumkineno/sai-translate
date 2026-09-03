@@ -1,7 +1,7 @@
 // Hover preselection — visual only, no LLM
 // Shows sentence-level highlight (Highlight API) + block icon/dashed, fully customizable
 
-import { findBestBlockAtPoint, findBestBlockForRange, getSentenceRangeAtPoint } from './utils/selection'
+import { findBestBlockAtPoint, findBestBlockForRange, findBestImageAtPoint, findBestImageForRange, getSentenceRangeAtPoint } from './utils/selection'
 
 type HoverCfg = {
   enabled: boolean
@@ -30,10 +30,11 @@ const DEFAULT: HoverCfg = {
 let cfgLoaded = false
 let cfg: HoverCfg = { ...DEFAULT }
 let currentAnchor: HTMLElement | null = null
+let currentImageAnchor: HTMLImageElement | null = null
 let currentSentenceRange: Range | null = null
 let currentSentenceText: string | null = null
 let iconEl: HTMLElement | null = null
-let prevBlockStyle: { bg: string; outline: string } | null = null
+let prevBlockStyle: { bg: string; outline: string; boxShadow: string } | null = null
 
 function shouldExclude(el: Element): boolean {
   const sel = cfg.excludeSelectors.trim()
@@ -44,6 +45,11 @@ function shouldExclude(el: Element): boolean {
 function findAnchorFromPoint(target: Element | null, x: number, y: number): HTMLElement | null {
   if (!target) return null
   if (shouldExclude(target)) return null
+  // Image first — same-origin loaded <img> takes precedence over text blocks
+  try {
+    const img = findBestImageAtPoint(x, y, cfg.excludeSelectors)
+    if (img) return img
+  } catch {}
   // Use best block at point
   const best = findBestBlockAtPoint(x, y, cfg.excludeSelectors)
   if (best) return best
@@ -63,25 +69,29 @@ function findAnchorFromPoint(target: Element | null, x: number, y: number): HTML
 }
 
 function findAnchorFromRange(): HTMLElement | null {
- const sel = window.getSelection()
- if (!sel || !sel.rangeCount || sel.isCollapsed) return null
- try {
- const range = sel.getRangeAt(0)
- const best = findBestBlockForRange(range, cfg.excludeSelectors)
- if (best) return best
- // fallback to first block ancestor
- let node: Node | null = range.commonAncestorContainer
- if (node.nodeType === Node.TEXT_NODE) node = (node as Text).parentElement
- let el = node as HTMLElement | null
- const isBlockLocal = (e: HTMLElement) => {
- const d = getComputedStyle(e).display
- return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || e.tagName === 'P' || /^H[1-6]$/.test(e.tagName)
- }
- while (el && el !== document.body && !isBlockLocal(el)) el = el.parentElement
- return el && el !== document.body ? el : null
- } catch {
- return null
- }
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return null
+  try {
+    const range = sel.getRangeAt(0)
+    try {
+      const img = findBestImageForRange(range, cfg.excludeSelectors)
+      if (img) return img
+    } catch {}
+    const best = findBestBlockForRange(range, cfg.excludeSelectors)
+    if (best) return best
+    // fallback to first block ancestor
+    let node: Node | null = range.commonAncestorContainer
+    if (node.nodeType === Node.TEXT_NODE) node = (node as Text).parentElement
+    let el = node as HTMLElement | null
+    const isBlockLocal = (e: HTMLElement) => {
+      const d = getComputedStyle(e).display
+      return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' || e.tagName === 'P' || /^H[1-6]$/.test(e.tagName)
+    }
+    while (el && el !== document.body && !isBlockLocal(el)) el = el.parentElement
+    return el && el !== document.body ? el : null
+  } catch {
+    return null
+  }
 }
 
 function ensureIcon(): HTMLElement {
@@ -139,12 +149,25 @@ function clearSentenceHighlight() {
 
 function applyBlockHighlight(anchor: HTMLElement) {
   if (!cfg.highlight && !cfg.dashed) return
-  prevBlockStyle = { bg: anchor.style.backgroundColor, outline: anchor.style.outline }
-  // If sentence highlight is active, skip block bg to avoid double
-  if (currentSentenceRange && cfg.highlight) {
+  prevBlockStyle = { bg: anchor.style.backgroundColor, outline: anchor.style.outline, boxShadow: anchor.style.boxShadow }
+  const isImg = anchor.tagName === 'IMG'
+  // If sentence highlight is active, skip block bg to avoid double (not relevant for images)
+  if (currentSentenceRange && cfg.highlight && !isImg) {
     // only dashed for block when sentence highlighted
     if (cfg.dashed) {
       anchor.style.outline = `${cfg.dashedWidth}px dashed ${cfg.dashedColor}`
+      anchor.style.outlineOffset = '2px'
+    }
+    return
+  }
+  if (isImg) {
+    // For <img> use outline + boxShadow, no background
+    if (cfg.dashed) {
+      anchor.style.outline = `${cfg.dashedWidth}px dashed ${cfg.dashedColor}`
+      anchor.style.outlineOffset = '2px'
+      anchor.style.boxShadow = '0 0 0 2px rgba(0,0,0,0.04)'
+    } else if (cfg.highlight) {
+      anchor.style.outline = `2px solid ${cfg.highlightColor}`
       anchor.style.outlineOffset = '2px'
     }
     return
@@ -163,11 +186,13 @@ function removeBlockHighlight(anchor: HTMLElement) {
   if (prevBlockStyle) {
     anchor.style.backgroundColor = prevBlockStyle.bg
     anchor.style.outline = prevBlockStyle.outline
+    anchor.style.boxShadow = prevBlockStyle.boxShadow
     prevBlockStyle = null
   } else {
     anchor.style.backgroundColor = ''
     anchor.style.outline = ''
     anchor.style.outlineOffset = ''
+    anchor.style.boxShadow = ''
   }
   if (anchor.dataset.saiOrigPosition !== undefined) {
     anchor.style.position = anchor.dataset.saiOrigPosition
@@ -178,6 +203,24 @@ function removeBlockHighlight(anchor: HTMLElement) {
 function showIconFor(anchor: HTMLElement) {
   if (!cfg.icon) return
   const icon = ensureIcon()
+  // IMG is void element — cannot append child, use fixed positioning at image rect
+  if (anchor.tagName === 'IMG') {
+    const rect = anchor.getBoundingClientRect()
+    icon.style.position = 'fixed'
+    // reset anchor-relative offsets
+    icon.style.bottom = ''
+    icon.style.left = ''
+    if (cfg.iconPosition === 'top-right') {
+      icon.style.top = `${rect.top + 6}px`
+      icon.style.right = `${window.innerWidth - rect.right + 6}px`
+    } else {
+      icon.style.top = ''
+      icon.style.bottom = `${window.innerHeight - rect.bottom + 6}px`
+      icon.style.right = `${window.innerWidth - rect.right + 6}px`
+    }
+    if (icon.parentElement !== document.body) document.body.appendChild(icon)
+    return
+  }
   const pos = getComputedStyle(anchor).position
   if (pos === 'static') {
     anchor.dataset.saiOrigPosition = anchor.style.position || ''
@@ -193,6 +236,7 @@ function showIconFor(anchor: HTMLElement) {
     icon.style.right = '6px'
     icon.style.top = ''
   }
+  icon.style.left = ''
   if (icon.parentElement !== anchor) anchor.appendChild(icon)
 }
 
@@ -202,7 +246,13 @@ function hideIcon() {
 
 function setCurrentByPoint(x: number, y: number, target: Element | null) {
   const anchor = findAnchorFromPoint(target, x, y)
+  const isImg = anchor?.tagName === 'IMG'
   if (currentAnchor === anchor && anchor !== null) {
+    if (isImg) {
+      // same image — keep highlight, reposition icon if needed
+      if (cfg.icon) showIconFor(anchor)
+      return
+    }
     // same block, but sentence may differ — update sentence highlight
     const sent = getSentenceRangeAtPoint(x, y)
     if (sent && sent.block === anchor) {
@@ -229,35 +279,58 @@ function setCurrentByPoint(x: number, y: number, target: Element | null) {
     currentSentenceText = null
   }
   currentAnchor = anchor
+  currentImageAnchor = isImg ? (anchor as HTMLImageElement) : null
   if (anchor) {
-    // Try sentence-level highlight at point
-    const sent = getSentenceRangeAtPoint(x, y)
-    if (sent && sent.block === anchor && sent.sentence.length >= 2 && sent.sentence.length < 600) {
-      currentSentenceRange = sent.range
-      currentSentenceText = sent.sentence
-      applySentenceHighlight(sent.range)
-      // also apply dashed for block context
-      applyBlockHighlight(anchor)
-    } else {
+    if (isImg) {
       currentSentenceRange = null
       currentSentenceText = null
+      clearSentenceHighlight()
       applyBlockHighlight(anchor)
+    } else {
+      // Try sentence-level highlight at point
+      const sent = getSentenceRangeAtPoint(x, y)
+      if (sent && sent.block === anchor && sent.sentence.length >= 2 && sent.sentence.length < 600) {
+        currentSentenceRange = sent.range
+        currentSentenceText = sent.sentence
+        applySentenceHighlight(sent.range)
+        // also apply dashed for block context
+        applyBlockHighlight(anchor)
+      } else {
+        currentSentenceRange = null
+        currentSentenceText = null
+        applyBlockHighlight(anchor)
+      }
     }
     showIconFor(anchor)
   } else {
     clearSentenceHighlight()
+    currentImageAnchor = null
   }
 }
 
 export function getCurrentAnchor(): HTMLElement | null {
- const sel = window.getSelection()
- if (sel && sel.rangeCount && !sel.isCollapsed) {
- try {
- const best = (findAnchorFromRange() as HTMLElement | null)
- if (best) return best
- } catch {}
- }
- return currentAnchor
+  const sel = window.getSelection()
+  if (sel && sel.rangeCount && !sel.isCollapsed) {
+    try {
+      const best = (findAnchorFromRange() as HTMLElement | null)
+      if (best) return best
+    } catch {}
+  }
+  return currentAnchor
+}
+
+export function getCurrentImageAnchor(): HTMLImageElement | null {
+  if (currentImageAnchor) return currentImageAnchor
+  if (currentAnchor && currentAnchor.tagName === 'IMG') return currentAnchor as HTMLImageElement
+  const sel = window.getSelection()
+  if (sel && sel.rangeCount && !sel.isCollapsed) {
+    try {
+      const r = sel.getRangeAt(0)
+      const img = findBestImageForRange(r, cfg.excludeSelectors)
+      if (img) return img
+    } catch {}
+  }
+  return null
 }
 
 export function getHoverSentence(): string | null {
@@ -336,6 +409,7 @@ export function initHover() {
         removeBlockHighlight(currentAnchor)
         hideIcon()
         currentAnchor = null
+        currentImageAnchor = null
         currentSentenceRange = null
         currentSentenceText = null
       }
@@ -359,6 +433,7 @@ export function initHover() {
       hideIcon()
     }
     currentAnchor = null
+    currentImageAnchor = null
     currentSentenceRange = null
     currentSentenceText = null
   })
@@ -370,6 +445,7 @@ export function clearHover() {
     hideIcon()
   }
   currentAnchor = null
+  currentImageAnchor = null
   currentSentenceRange = null
   currentSentenceText = null
 }

@@ -21,8 +21,8 @@ export default defineManifest({
     },
     default_popup: 'src/popup/index.html',
   },
-  permissions: ['storage', 'activeTab', 'tabs'],
-  host_permissions: ['https://*/*', 'http://*/*'],
+  permissions: ['storage', 'activeTab', 'tabs', 'webRequest'],
+  host_permissions: ['<all_urls>'],
   background: {
     service_worker: 'src/background/index.ts',
     type: 'module',

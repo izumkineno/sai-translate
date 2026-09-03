@@ -571,3 +571,240 @@ export function isValidText(text: string): boolean {
   if (/^\W+$/.test(t)) return false
   return true
 }
+
+// --- Image helpers for Vision translation (same-origin only) ---
+
+export function isTranslatableImage(img: HTMLImageElement): boolean {
+  if (!img || img.tagName !== 'IMG') return false
+  const src = (img.src || '').trim()
+  if (!src) return false
+  if (src.includes('chrome.google.com')) return false
+  const low = src.toLowerCase()
+  if (low.startsWith('data:image/')) {
+    // data URL allowed
+  } else if (low.startsWith('blob:')) {
+    return false
+  } else {
+    try {
+      const url = new URL(src, location.href)
+      // 允许跨域（pixiv www.pixiv.net → i.pximg.net 等 CDN），不再卡同源
+      // 仅拦截非 http(s) 与 chrome 域
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+      // host_permissions 已含 https://*/* 与 http://*/*，跨域图片由后续 getImageDataURL 的 canvas→background fetch 兜底
+    } catch {
+      return false
+    }
+  }
+  if (!img.complete) return false
+  if (img.naturalWidth <= 0 || img.naturalHeight <= 0) return false
+  return true
+}
+
+async function fetchImageViaBackground(src: string): Promise<string | null> {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'SAI_FETCH_IMAGE', url: src }) as unknown as { ok?: boolean; dataUrl?: string }
+    if (resp && resp.ok && typeof resp.dataUrl === 'string' && resp.dataUrl.startsWith('data:image/')) return resp.dataUrl
+  } catch {}
+  return null
+}
+
+export function findBestImageAtPoint(x: number, y: number, excludeSel = ''): HTMLImageElement | null {
+  // Check elementsFromPoint/elementFromPoint branch
+  const checkCandidate = (el: Element | null): HTMLImageElement | null => {
+    if (!el) return null
+    if (excludeSel && shouldExcludeNode(el, excludeSel)) return null
+    if (el.tagName === 'IMG') {
+      const img = el as HTMLImageElement
+      if (isTranslatableImage(img) && !shouldExcludeNode(img, excludeSel)) return img
+    }
+    try {
+      const closest = (el as HTMLElement).closest?.('img') as HTMLImageElement | null
+      if (closest && isTranslatableImage(closest) && !shouldExcludeNode(closest, excludeSel)) return closest
+    } catch {}
+    return null
+  }
+  try {
+    const top = document.elementFromPoint(x, y) as Element | null
+    const hit = checkCandidate(top)
+    if (hit) return hit
+  } catch {}
+  // fallback: elementsFromPoint to handle stacking/overlays
+  try {
+    // elementsFromPoint not yet in all lib.dom definitions — use feature detection
+    const docForHitTest = document as unknown as Document & {
+      elementsFromPoint?: (x: number, y: number) => Element[]
+    } // typed hit-test extension
+    const fn = docForHitTest.elementsFromPoint
+    if (typeof fn === 'function') {
+      const els = fn.call(document, x, y)
+      for (const el of els) {
+        const hit = checkCandidate(el)
+        if (hit) return hit
+      }
+    }
+  } catch {}
+  return null
+}
+
+export function findBestImageForRange(range: Range, excludeSel = ''): HTMLImageElement | null {
+  try {
+    let node: Node | null = range.commonAncestorContainer
+    let root: Element | null = null
+    if (node.nodeType === Node.ELEMENT_NODE) root = node as Element
+    else root = (node.parentElement as Element | null) ?? document.body
+    if (!root) root = document.body
+    let candidateRoot: Element = root
+    try {
+      const c = (root as HTMLElement).closest?.('article,main,#content,.content') as Element | null
+      if (c) candidateRoot = c
+    } catch {}
+    const searchRoot: Element =
+      candidateRoot === document.body && range.toString().length > 200 ? document.body : candidateRoot
+
+    const candidates: HTMLImageElement[] = []
+    // searchRoot itself could be an <img>
+    if (searchRoot.tagName === 'IMG') {
+      const img = searchRoot as HTMLImageElement
+      if (isTranslatableImage(img) && !shouldExcludeNode(img, excludeSel)) {
+        try {
+          if (range.intersectsNode(img)) candidates.push(img)
+        } catch {}
+      }
+    }
+    const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(node) {
+        const el = node as HTMLElement
+        if (el.tagName !== 'IMG') return NodeFilter.FILTER_SKIP
+        if (excludeSel && shouldExcludeNode(el, excludeSel)) return NodeFilter.FILTER_SKIP
+        const img = el as HTMLImageElement
+        if (!isTranslatableImage(img)) return NodeFilter.FILTER_SKIP
+        try {
+          if (!range.intersectsNode(img)) return NodeFilter.FILTER_SKIP
+        } catch {
+          return NodeFilter.FILTER_SKIP
+        }
+        return NodeFilter.FILTER_ACCEPT
+      },
+    })
+    let n: Node | null
+    while ((n = walker.nextNode())) candidates.push(n as HTMLImageElement)
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+    return candidates[0]!
+  } catch {
+    return null
+  }
+}
+
+export async function getImageDataURLForTranslation(img: HTMLImageElement): Promise<string | null> {
+  // Wait for load if not complete (up to 3s)
+  if (!img.complete) {
+    const raced = await Promise.race([
+      new Promise<boolean>((resolve) => {
+        let settled = false
+        const cleanup = () => {
+          img.removeEventListener('load', onLoad)
+          img.removeEventListener('error', onError)
+        }
+        const onLoad = () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve(true)
+        }
+        const onError = () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve(false)
+        }
+        img.addEventListener('load', onLoad, { once: true })
+        img.addEventListener('error', onError, { once: true })
+      }),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
+    ])
+    void raced
+    if (!img.complete) return null
+  }
+  if (!img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0) return null
+
+  let w = img.naturalWidth
+  let h = img.naturalHeight
+  if (w <= 0 || h <= 0) return null
+  const MAX_SIDE = 8192
+  const MAX_PIXELS = 33_000_000
+  let scale = Math.min(1, MAX_SIDE / Math.max(w, h), Math.sqrt(MAX_PIXELS / (w * h)))
+  if (!isFinite(scale) || scale <= 0) scale = 1
+  if (scale < 1) {
+    w = Math.max(1, Math.floor(w * scale))
+    h = Math.max(1, Math.floor(h * scale))
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const getOutputMime = (img: HTMLImageElement): { mime: string; quality?: number } => {
+    const src = (img.currentSrc || img.src || '').toLowerCase()
+    if (src.endsWith('.webp')) return { mime: 'image/webp', quality: 0.92 }
+    if (src.endsWith('.png')) return { mime: 'image/png' }
+    if (src.endsWith('.jpg') || src.endsWith('.jpeg')) return { mime: 'image/jpeg', quality: 0.92 }
+    // pixiv 原图多为 jpg，默认 jpeg 更省；png 透明图会退化但仍可译（白底）
+    // 为避免 429k jpg 被 png 膨胀为 3.2M，此处默认 jpeg
+    return { mime: 'image/jpeg', quality: 0.92 }
+  }
+  const outMime = getOutputMime(img)
+  const drawAndEncode = (mime: string, quality?: number): string | null => {
+    const c = canvas.getContext('2d')
+    if (!c) return null
+    try {
+      // jpeg 不支持透明，先铺白底避免黑底
+      if (mime === 'image/jpeg') {
+        c.fillStyle = '#ffffff'
+        c.fillRect(0, 0, w, h)
+      }
+      c.drawImage(img, 0, 0, w, h)
+    } catch {
+      return null
+    }
+    try {
+      return quality !== undefined ? canvas.toDataURL(mime, quality) : canvas.toDataURL(mime)
+    } catch {
+      return null
+    }
+  }
+  let dataUrl: string | null = drawAndEncode(outMime.mime, outMime.quality)
+  if (!dataUrl) {
+    // canvas 污点（跨域 pximg.net 等）——走 background fetch 绕过 CORS
+    const fetched = await fetchImageViaBackground(img.src)
+    if (!fetched) return null
+    dataUrl = fetched
+  }
+  if (!dataUrl) return null
+  const getBytes = (url: string): { b64Len: number; bytes: number } => {
+    const parts = url.split(',')
+    const b64 = parts[1] ?? ''
+    // approximate bytes, ignoring padding
+    const bytes = Math.ceil(b64.length * 0.75)
+    return { b64Len: b64.length, bytes }
+  }
+
+  let { b64Len, bytes } = getBytes(dataUrl)
+  let retries = 0
+  while ((bytes > 10 * 1024 * 1024 || b64Len > 14_000_000) && retries < 3) {
+    retries++
+    w = Math.max(1, Math.floor(w * 0.9))
+    h = Math.max(1, Math.floor(h * 0.9))
+    canvas.width = w
+    canvas.height = h
+    // need fresh ctx after resize (same canvas element, but re-get)
+    // ctx remains valid but clear
+    dataUrl = drawAndEncode(outMime.mime, outMime.quality)
+    if (!dataUrl) return null
+    const s = getBytes(dataUrl)
+    b64Len = s.b64Len
+    bytes = s.bytes
+  }
+  // final check: if still over limits after retries, return null to signal too large
+  if (bytes > 10 * 1024 * 1024 || b64Len > 14_000_000) return null
+  return dataUrl
+}

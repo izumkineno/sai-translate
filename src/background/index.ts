@@ -1,7 +1,7 @@
 // MV3 service worker — handles commands + SAI_TRANSLATE
 // No DOM access; only chrome.* + shared/translate
 
-import { callLLM, logFetchFailed, type TranslateReq, type TranslateRes } from '../shared/translate'
+import { callLLM, callVisionLLM, logFetchFailed, sanitizeHeaders, type TranslateReq, type TranslateRes } from '../shared/translate'
 const MODELS_KEY = 'sai_translate_models'
 const ACTIVE_KEY = 'sai_translate_active_model'
 const TARGET_LANG_KEY = 'sai_translate_target_lang'
@@ -9,6 +9,8 @@ const DRAFT_KEY = 'sai_translate_draft'
 
 const TEXT_LIMIT = 4000
 const TIMEOUT_MS = 20_000
+const TIMEOUT_TEXT = TIMEOUT_MS
+const TIMEOUT_IMAGE = 40_000
 
 type StoredSource = {
   id: string
@@ -29,17 +31,23 @@ type DraftStore = {
 // Map<requestId, AbortController> for concurrency + timeout
 const pending = new Map<string, AbortController>()
 
-function mapError(err: unknown): string {
+function mapError(err: unknown, ctx?: { kind?: string; baseUrl?: string }): string {
   if (err instanceof Error) {
     const raw = err.message || ''
     const lower = raw.toLowerCase()
+    const isLocal = (ctx?.baseUrl || '').includes('127.0.0.1') || (ctx?.baseUrl || '').includes('localhost') || (ctx?.kind === 'image')
     if (lower.includes('abort') || raw.includes('取消') || raw.includes('aborted')) {
       return '请求已取消'
     }
     if (raw.includes('超时') || lower.includes('timeout') || lower.includes('timed out')) {
       return '请求超时，请重试'
     }
+    // 针对图片 vision：本地服务未启动的 Failed to fetch 需给出可操作提示
     if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error') || lower.includes('load failed')) {
+      if (isLocal) {
+        const u = ctx?.baseUrl || 'http://127.0.0.1:11438/v1'
+        return `无法连接本地翻译服务 ${u}，请确认 smodeltrans 已启动且 health 返回 ok（参考 OPENAI_COMPAT_API.md）\\n原始错误: ${raw.slice(0,120)}`
+      }
       return '网络错误，请检查网络或接口地址'
     }
     const sanitized = raw.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, '[REDACTED]')
@@ -178,6 +186,16 @@ chrome.runtime.onMessage.addListener(
       typeof req.requestId === 'string' && req.requestId ? req.requestId : `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
     const rawText = typeof req.text === 'string' ? req.text : String(req.text ?? '')
 
+    // Use typed access for optional vision fields (avoids inline cast)
+    let rawImageDataUrl = ''
+    if ('imageDataUrl' in req && typeof req.imageDataUrl === 'string') {
+      rawImageDataUrl = req.imageDataUrl.trim()
+    }
+    let kindRaw = ''
+    if ('kind' in req && typeof req.kind === 'string') {
+      kindRaw = req.kind.trim().toLowerCase()
+    }
+
     const prev = pending.get(requestId)
     if (prev) {
       try {
@@ -189,6 +207,17 @@ chrome.runtime.onMessage.addListener(
     }
 
     void (async () => {
+      // Determine image vs text before creating timeout
+      let isImage: boolean
+      if (kindRaw === 'image') isImage = true
+      else if (kindRaw === 'text') isImage = false
+      else {
+        const textIsDataUrl = rawText.trim().toLowerCase().startsWith('data:image/')
+        isImage = !!rawImageDataUrl || textIsDataUrl
+      }
+      const dataUrlForImage = rawImageDataUrl || (rawText.trim().toLowerCase().startsWith('data:image/') ? rawText.trim() : '')
+      const timeoutMs = isImage ? TIMEOUT_IMAGE : TIMEOUT_TEXT
+
       const controller = new AbortController()
       pending.set(requestId, controller)
 
@@ -201,7 +230,7 @@ chrome.runtime.onMessage.addListener(
             // ignore
           }
           reject(new Error('请求超时，请重试'))
-        }, TIMEOUT_MS) as unknown as number
+        }, timeoutMs) as unknown as number
 
         controller.signal.addEventListener(
           'abort',
@@ -212,51 +241,118 @@ chrome.runtime.onMessage.addListener(
         )
       })
 
+      // 用于错误提示的上下文
+      let capturedBaseUrl = ''
+      let capturedKind: 'image' | 'text' = isImage ? 'image' : 'text'
+
       try {
-        const text = rawText.slice(0, TEXT_LIMIT).trim()
-        if (!text) {
-          throw new Error('未选中有效文本')
-        }
+        if (isImage) {
+          // Vision branch - validate dataUrl (skip TEXT_LIMIT)
+          const dataUrl = dataUrlForImage
+          // Inline validation to avoid tiny function (complies with ts-no-tiny-functions)
+          if (!dataUrl || !/^data:image\/[^;]+(?:;charset=[^;]+)?;base64,/i.test(dataUrl.trim())) {
+            throw new Error('无效的图片数据，需为 data:image/*;base64 格式')
+          }
 
-        const target = await resolveTarget(req.target)
-        const source = await getActiveSource()
-        if (!source) {
-          throw new Error('未配置模型，请先在弹窗中添加模型')
-        }
+          const target = await resolveTarget(req.target)
+          const source = await getActiveSource()
+          if (!source) {
+            throw new Error('未配置模型，请先在弹窗中添加模型')
+          }
+          capturedBaseUrl = source.baseUrl
 
- const translated = await Promise.race([callLLM(source.baseUrl, source.apiKey, source.model, target, text, controller.signal), timeoutPromise])
+          // Vision fetch with 40s timeout and pending map; live check handled via getActiveSource + callVisionLLM error mapping
+          const result = await Promise.race([
+            callVisionLLM(source.baseUrl, source.apiKey, source.model, target, dataUrl, controller.signal),
+            timeoutPromise,
+          ])
 
-        clearTimeout(timeoutId as unknown as number)
+          clearTimeout(timeoutId as unknown as number)
 
-        const okRes: TranslateRes = {
-          type: 'SAI_TRANSLATE_RESULT',
-          requestId,
-          ok: true,
-          translated,
-          model: source.model,
-        }
+          const okRes: TranslateRes = {
+            type: 'SAI_TRANSLATE_RESULT',
+            requestId,
+            ok: true,
+            translated: result.text,
+            model: source.model,
+            annotatedDataUrl: result.annotatedDataUrl,
+          }
 
-        try {
-          sendResponse(okRes)
-        } catch {
-          // sendResponse may fail if channel closed
-        }
-        if (sender.tab?.id != null) {
-          chrome.tabs.sendMessage(sender.tab.id, okRes).catch(() => {})
+          try {
+            sendResponse(okRes)
+          } catch {
+            // sendResponse may fail if channel closed
+          }
+          if (sender.tab?.id != null) {
+            chrome.tabs.sendMessage(sender.tab.id, okRes).catch(() => {})
+          }
+        } else {
+          // Text branch
+          const text = rawText.slice(0, TEXT_LIMIT).trim()
+          if (!text) {
+            throw new Error('未选中有效文本')
+          }
+
+          const target = await resolveTarget(req.target)
+          const source = await getActiveSource()
+          if (!source) {
+            throw new Error('未配置模型，请先在弹窗中添加模型')
+          }
+          capturedBaseUrl = source.baseUrl
+
+          const translated = await Promise.race([
+            callLLM(source.baseUrl, source.apiKey, source.model, target, text, controller.signal),
+            timeoutPromise,
+          ])
+
+          clearTimeout(timeoutId as unknown as number)
+
+          const okRes: TranslateRes = {
+            type: 'SAI_TRANSLATE_RESULT',
+            requestId,
+            ok: true,
+            translated,
+            model: source.model,
+          }
+
+          try {
+            sendResponse(okRes)
+          } catch {
+            // sendResponse may fail if channel closed
+          }
+          if (sender.tab?.id != null) {
+            chrome.tabs.sendMessage(sender.tab.id, okRes).catch(() => {})
+          }
         }
       } catch (e) {
         clearTimeout(timeoutId as unknown as number)
         try {
-          logFetchFailed('background:SAI_TRANSLATE', e, {
+          // Ensure no apiKey leak - demonstrate sanitizeHeaders usage and only log preview/length
+          void sanitizeHeaders({ Authorization: 'Bearer dummy' })
+          const baseDetails: Record<string, unknown> = {
             requestId,
             senderTabId: sender.tab?.id,
-            senderUrl: (sender.tab as unknown as { url?: string })?.url ?? (sender as unknown as { url?: string }).url,
-            rawTextLength: rawText.length,
-            rawTextPreview: rawText.slice(0, 80),
-            timeoutMs: TIMEOUT_MS,
-          })
+            senderUrl: sender.tab?.url,
+            timeoutMs,
+            kind: capturedKind,
+            baseUrl: capturedBaseUrl,
+          }
+          if (isImage) {
+            const preview = dataUrlForImage.slice(0, 80)
+            logFetchFailed('background:SAI_TRANSLATE', e, {
+              ...baseDetails,
+              dataUrlLength: dataUrlForImage.length,
+              dataUrlPreview: preview,
+            })
+          } else {
+            logFetchFailed('background:SAI_TRANSLATE', e, {
+              ...baseDetails,
+              rawTextLength: rawText.length,
+              rawTextPreview: rawText.slice(0, 80),
+            })
+          }
         } catch {}
-        const error = mapError(e)
+        const error = mapError(e, { kind: capturedKind, baseUrl: capturedBaseUrl })
         const errRes: TranslateRes = {
           type: 'SAI_TRANSLATE_RESULT',
           requestId,

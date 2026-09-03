@@ -1,4 +1,5 @@
 import { getCurrentAnchor } from './hover'
+import * as HoverNS from './hover'
 import { injectLoading, removeAll, hasCard, removeCard, updateCard } from './inject'
 import {
   expandContainerToParagraphs,
@@ -9,9 +10,10 @@ import {
   getSelectedTextForBlock,
   isValidText,
 } from './utils/selection'
+import * as SelectionNS from './utils/selection'
 
-type TranslateReq = { type: 'SAI_TRANSLATE'; text: string; target?: string; requestId: string }
-type TranslateRes = { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: boolean; translated?: string; error?: string; model?: string }
+type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; target?: string; requestId: string }
+type TranslateRes = { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: boolean; translated?: string; error?: string; model?: string; annotatedDataUrl?: string }
 
 let shortcutKey = 'KeyQ'
 let targetLang = '中文'
@@ -28,6 +30,168 @@ async function loadConfig() {
 
 function genId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+// ---------- image helpers: resolve dynamic exports with fallback ----------
+function resolveImageHelpers() {
+  const ns = SelectionNS as unknown as Record<string, unknown>
+  return {
+    isTranslatableImage: ns['isTranslatableImage'] as ((img: HTMLImageElement) => boolean) | undefined,
+    findBestImageForRange: ns['findBestImageForRange'] as ((range: Range, exclude?: string) => HTMLImageElement | null) | undefined,
+    findBestImageAtPoint: ns['findBestImageAtPoint'] as ((x: number, y: number, exclude?: string) => HTMLImageElement | null) | undefined,
+    getImageDataURLForTranslation: ns['getImageDataURLForTranslation'] as ((img: HTMLImageElement) => Promise<string | null>) | undefined,
+  }
+}
+
+function getCurrentImageAnchor(): HTMLImageElement | null {
+  const hoverAny = HoverNS as unknown as Record<string, unknown>
+  const fn = hoverAny['getCurrentImageAnchor']
+  if (typeof fn === 'function') {
+    try {
+      const v = (fn as () => unknown)()
+      if (v instanceof HTMLImageElement) return v
+    } catch {}
+  }
+  const anchor = getCurrentAnchor()
+  if (anchor instanceof HTMLImageElement) return anchor
+  return null
+}
+
+function getExcludeSel(): string {
+  try {
+    const fn = (HoverNS as unknown as Record<string, unknown>)['getHoverConfig'] as (() => unknown) | undefined
+    if (typeof fn === 'function') {
+      const cfg = fn() as Record<string, unknown>
+      const sel = cfg['excludeSelectors']
+      if (typeof sel === 'string') return sel
+    }
+  } catch {}
+  return ''
+}
+
+function isTranslatableImageFallback(img: HTMLImageElement): boolean {
+  try {
+    if (!(img instanceof HTMLImageElement)) return false
+    if (!img.src) return false
+    if (img.src.startsWith('data:')) return true
+    if (img.src.startsWith('blob:')) return false
+    if (!img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) return false
+    try {
+      const u = new URL(img.src, location.href)
+      if (u.protocol === 'data:') return true
+      return u.origin === location.origin
+    } catch {
+      return false
+    }
+  } catch {
+    return false
+  }
+}
+
+async function getImageDataURLFallback(img: HTMLImageElement): Promise<string | null> {
+  try {
+    if (!img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) return null
+    const helpers = resolveImageHelpers()
+    const check = helpers.isTranslatableImage || isTranslatableImageFallback
+    if (!check(img)) return null
+    const maxSide = 8192
+    const maxPixels = 33_000_000
+    let w = img.naturalWidth
+    let h = img.naturalHeight
+    let scale = 1
+    if (Math.max(w, h) > maxSide) scale = Math.min(scale, maxSide / Math.max(w, h))
+    if (w * h > maxPixels) scale = Math.min(scale, Math.sqrt(maxPixels / (w * h)))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(w * scale))
+    canvas.height = Math.max(1, Math.round(h * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    let dataUrl: string
+    try {
+      dataUrl = canvas.toDataURL('image/png')
+    } catch {
+      return null
+    }
+    try {
+      const b64 = dataUrl.split(',')[1] || ''
+      const bytes = Math.ceil(b64.length * 3 / 4)
+      if (bytes > 10 * 1024 * 1024) {
+        let curScale = scale * 0.8
+        for (let i = 0; i < 3; i++) {
+          canvas.width = Math.max(1, Math.round(w * curScale))
+          canvas.height = Math.max(1, Math.round(h * curScale))
+          const c2 = canvas.getContext('2d')
+          if (!c2) break
+          c2.drawImage(img, 0, 0, canvas.width, canvas.height)
+          try {
+            dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+          } catch {
+            return null
+          }
+          const b2 = dataUrl.split(',')[1] || ''
+          const by2 = Math.ceil(b2.length * 3 / 4)
+          if (by2 <= 10 * 1024 * 1024) break
+          curScale *= 0.7
+        }
+        const finalB64 = dataUrl.split(',')[1] || ''
+        if (Math.ceil(finalB64.length * 3 / 4) > 10 * 1024 * 1024) return null
+      }
+    } catch {}
+    return dataUrl
+  } catch {
+    return null
+  }
+}
+
+function getImageErrorMessage(img: HTMLImageElement, getterReturnedNull: boolean): string {
+  if (!img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) return '无法获取原图 (未加载)'
+  const helpers = resolveImageHelpers()
+  const check = helpers.isTranslatableImage || isTranslatableImageFallback
+  let isTranslatable = false
+  try { isTranslatable = check(img) } catch { isTranslatable = false }
+  if (!isTranslatable) {
+    try {
+      const u = new URL(img.src, location.href)
+      if (u.origin !== location.origin && !img.src.startsWith('data:')) return '无法获取原图 (CORS)'
+      if (img.src.startsWith('blob:')) return '无法获取原图 (CORS)'
+    } catch {}
+    // Check size as alternative for large
+    if (img.naturalWidth > 8192 || img.naturalHeight > 8192 || img.naturalWidth * img.naturalHeight > 33_000_000) return '图片过大'
+    return '无法获取原图 (CORS/未加载)'
+  }
+  if (getterReturnedNull) {
+    if (img.naturalWidth > 8192 || img.naturalHeight > 8192 || img.naturalWidth * img.naturalHeight > 33_000_000) return '图片过大'
+    return '无法获取原图 (CORS/未加载)'
+  }
+  return '无法获取原图 (CORS/未加载)'
+}
+
+function collectImagesInRange(range: Range): HTMLImageElement[] {
+  const excludeSel = getExcludeSel()
+  const result: HTMLImageElement[] = []
+  try {
+    const all = document.querySelectorAll('img')
+    for (const el of Array.from(all)) {
+      if (!(el instanceof HTMLImageElement)) continue
+      if (excludeSel) {
+        try { if (el.closest(excludeSel)) continue } catch {}
+      }
+      try {
+        if (range.intersectsNode(el)) result.push(el)
+      } catch {}
+    }
+  } catch {}
+  // dedup preserve order
+  const seen = new Set<HTMLImageElement>()
+  const uniq: HTMLImageElement[] = []
+  for (const img of result) {
+    if (!seen.has(img)) {
+      seen.add(img)
+      uniq.push(img)
+    }
+  }
+  return uniq
 }
 
 async function doTranslate(text: string, anchor: HTMLElement | null, explicitTarget?: string) {
@@ -57,6 +221,7 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
   }
   const req: TranslateReq = {
     type: 'SAI_TRANSLATE',
+    kind: 'text',
     text: normalized.slice(0, 4000),
     target: explicitTarget || targetLang,
     requestId: genId(),
@@ -86,6 +251,53 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
   } catch (e) {
     const msg = e instanceof Error ? e.message : '请求失败'
     updateCard(targetAnchor, 'error', msg.slice(0, 200), '错误', () => { void doTranslate(text, targetAnchor, explicitTarget) })
+  }
+}
+
+async function doTranslateImage(dataUrl: string, anchor: HTMLElement, explicitTarget?: string) {
+  let targetAnchor: HTMLElement = anchor
+  if (!targetAnchor) targetAnchor = document.body as unknown as HTMLElement
+  try {
+    await injectLoading(targetAnchor)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '注入失败'
+    updateCard(targetAnchor, 'error', msg, '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
+    return
+  }
+  const req: TranslateReq = {
+    type: 'SAI_TRANSLATE',
+    kind: 'image',
+    text: dataUrl,
+    imageDataUrl: dataUrl,
+    target: explicitTarget || targetLang,
+    requestId: genId(),
+  }
+  const send = () =>
+    new Promise<TranslateRes>((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(req, (res: unknown) => {
+          const err = chrome.runtime.lastError
+          if (err) { reject(new Error(err.message)); return }
+          if (!res || typeof res !== 'object') { reject(new Error('无响应')); return }
+          const r = res as Record<string, unknown>
+          if (r['type'] !== 'SAI_TRANSLATE_RESULT') { reject(new Error('响应类型错误')); return }
+          resolve(r as unknown as TranslateRes)
+        })
+      } catch (e) { reject(e) }
+    })
+  try {
+    const res = await send()
+    if (res.ok) {
+      const translated = typeof res.translated === 'string' ? res.translated : ''
+      const annotated = typeof res.annotatedDataUrl === 'string' ? res.annotatedDataUrl : undefined
+      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) }, annotated)
+    } else {
+      const err = typeof res.error === 'string' ? res.error : '翻译失败'
+      updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '请求失败'
+    updateCard(targetAnchor, 'error', msg.slice(0, 300), '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
   }
 }
 
@@ -161,8 +373,173 @@ async function translateBlocksQueue(
   await Promise.all(workers)
 }
 
+async function translateImagesQueue(imgs: HTMLImageElement[], explicitTarget?: string) {
+  const seen = new Set<HTMLImageElement>()
+  const uniq = imgs.filter((img) => {
+    if (seen.has(img)) return false
+    seen.add(img)
+    return true
+  })
+  if (uniq.length === 0) return
+  // single fast path still via queue for error isolation uniform
+  let idx = 0
+  const workers = Array.from({ length: Math.min(QUEUE_CONCURRENCY, uniq.length) }, async () => {
+    while (true) {
+      const cur = idx++
+      if (cur >= uniq.length) break
+      const img = uniq[cur]!
+      try {
+        const helpers = resolveImageHelpers()
+        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+        let dataUrl: string | null = null
+        try {
+          dataUrl = await getter(img)
+        } catch {
+          dataUrl = null
+        }
+        if (!dataUrl) {
+          const msg = getImageErrorMessage(img, true)
+          try {
+            await injectLoading(img)
+          } catch (e) {
+            const imsg = e instanceof Error ? e.message : '注入失败'
+            try { updateCard(img, 'error', imsg, '错误', () => { void translateImagesQueue([img], explicitTarget) }) } catch {}
+            continue
+          }
+          updateCard(img, 'error', msg, '错误', () => {
+            void (async () => {
+              let retryData: string | null = null
+              try { retryData = await getter(img) } catch { retryData = null }
+              if (!retryData) {
+                const rmsg = getImageErrorMessage(img, true)
+                updateCard(img, 'error', rmsg, '错误', () => { void translateImagesQueue([img], explicitTarget) })
+              } else {
+                void doTranslateImage(retryData, img, explicitTarget)
+              }
+            })()
+          })
+          continue
+        }
+        await doTranslateImage(dataUrl, img, explicitTarget)
+      } catch {
+        // isolated, continue to next
+      }
+    }
+  })
+  await Promise.all(workers)
+}
+
 function handleTranslateSelection() {
   const { text, range } = getSelectedText()
+
+  // 0) 图片分支优先：Range 覆盖的图（多图并发 3，单图直译）
+  if (range) {
+    try {
+      const imgsInRange = collectImagesInRange(range)
+      if (imgsInRange.length > 0) {
+        if (imgsInRange.length > 1) {
+          void translateImagesQueue(imgsInRange)
+          return
+        }
+        // single image in range
+        const singleImg = imgsInRange[0]!
+        void (async () => {
+          const helpers = resolveImageHelpers()
+          const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+          let dataUrl: string | null = null
+          try { dataUrl = await getter(singleImg) } catch { dataUrl = null }
+          if (!dataUrl) {
+            const msg = getImageErrorMessage(singleImg, true)
+            try {
+              await injectLoading(singleImg)
+              updateCard(singleImg, 'error', msg, '错误', () => {
+                void (async () => {
+                  let retryData: string | null = null
+                  try { retryData = await getter(singleImg) } catch { retryData = null }
+                  if (!retryData) {
+                    const rmsg = getImageErrorMessage(singleImg, true)
+                    updateCard(singleImg, 'error', rmsg, '错误', () => { void (async () => { let d=null; try{d=await getter(singleImg)}catch{}; if(!d) updateCard(singleImg,'error',getImageErrorMessage(singleImg,true),'错误',()=>{}); else void doTranslateImage(d,singleImg)})() })
+                  } else {
+                    void doTranslateImage(retryData, singleImg)
+                  }
+                })()
+              })
+            } catch (e) {
+              const imsg = e instanceof Error ? e.message : msg
+              try { updateCard(singleImg, 'error', imsg, '错误', () => {}) } catch {}
+            }
+            return
+          }
+          await doTranslateImage(dataUrl, singleImg)
+        })()
+        return
+      }
+      // fallback to helper's best image if collect missed (e.g., figure wrapping)
+      const helpers = resolveImageHelpers()
+      if (helpers.findBestImageForRange) {
+        try {
+          const best = helpers.findBestImageForRange(range, getExcludeSel())
+          if (best) {
+            void (async () => {
+              const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+              let dataUrl: string | null = null
+              try { dataUrl = await getter(best) } catch { dataUrl = null }
+              if (!dataUrl) {
+                const msg = getImageErrorMessage(best, true)
+                try {
+                  await injectLoading(best)
+                  updateCard(best, 'error', msg, '错误', () => {
+                    void (async () => {
+                      let retryData: string | null = null
+                      try { retryData = await getter(best) } catch { retryData = null }
+                      if (!retryData) updateCard(best, 'error', getImageErrorMessage(best, true), '错误', () => {})
+                      else void doTranslateImage(retryData, best)
+                    })()
+                  })
+                } catch {}
+                return
+              }
+              await doTranslateImage(dataUrl, best)
+            })()
+            return
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // 0b) Hover image 优先（无选区或选区无图）：悬停图直译
+  {
+    const hoverImg = getCurrentImageAnchor()
+    if (hoverImg) {
+      void (async () => {
+        const helpers = resolveImageHelpers()
+        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+        let dataUrl: string | null = null
+        try { dataUrl = await getter(hoverImg) } catch { dataUrl = null }
+        if (!dataUrl) {
+          const msg = getImageErrorMessage(hoverImg, true)
+          try {
+            await injectLoading(hoverImg)
+            updateCard(hoverImg, 'error', msg, '错误', () => {
+              void (async () => {
+                let retryData: string | null = null
+                try { retryData = await getter(hoverImg) } catch { retryData = null }
+                if (!retryData) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
+                else void doTranslateImage(retryData, hoverImg)
+              })()
+            })
+          } catch (e) {
+            const imsg = e instanceof Error ? e.message : msg
+            try { updateCard(hoverImg, 'error', imsg, '错误', () => {}) } catch {}
+          }
+          return
+        }
+        await doTranslateImage(dataUrl, hoverImg)
+      })()
+      return
+    }
+  }
 
   // 1) 有选区：优先按 Range 内的块级元素拆分（已覆盖“选中父容器”时的 leaf 收集）
   if (range) {
@@ -294,6 +671,66 @@ export function initShortcut() {
     const detail = (ev as CustomEvent).detail as { anchor: HTMLElement | null; sentence?: string } | undefined
     const anchor = detail?.anchor || getCurrentAnchor()
     if (!anchor) return
+    // If anchor is an image, route to image translation
+    if (anchor instanceof HTMLImageElement) {
+      void (async () => {
+        const helpers = resolveImageHelpers()
+        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+        let dataUrl: string | null = null
+        try { dataUrl = await getter(anchor) } catch { dataUrl = null }
+        if (!dataUrl) {
+          const msg = getImageErrorMessage(anchor, true)
+          try {
+            await injectLoading(anchor)
+            updateCard(anchor, 'error', msg, '错误', () => {
+              void (async () => {
+                let retryData: string | null = null
+                try { retryData = await getter(anchor) } catch { retryData = null }
+                if (!retryData) updateCard(anchor, 'error', getImageErrorMessage(anchor, true), '错误', () => {})
+                else void doTranslateImage(retryData, anchor)
+              })()
+            })
+          } catch {}
+          return
+        }
+        await doTranslateImage(dataUrl, anchor)
+      })()
+      return
+    }
+    // also check if currentImageAnchor exists and anchor contains image? Fallback: try hover image anchor
+    const hoverImg = getCurrentImageAnchor()
+    if (hoverImg && hoverImg !== anchor) {
+      // Prefer hover image if it differs and anchor is container of that image? Use hoverImg
+      // But icon click's anchor is already the hovered element; if hoverImg is image and anchor is its container, use image
+      // Check if anchor contains hoverImg
+      try {
+        if (anchor.contains(hoverImg)) {
+          void (async () => {
+            const helpers = resolveImageHelpers()
+            const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
+            let dataUrl: string | null = null
+            try { dataUrl = await getter(hoverImg) } catch { dataUrl = null }
+            if (!dataUrl) {
+              const msg = getImageErrorMessage(hoverImg, true)
+              try {
+                await injectLoading(hoverImg)
+                updateCard(hoverImg, 'error', msg, '错误', () => {
+                  void (async () => {
+                    let retryData: string | null = null
+                    try { retryData = await getter(hoverImg) } catch { retryData = null }
+                    if (!retryData) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
+                    else void doTranslateImage(retryData, hoverImg)
+                  })()
+                })
+              } catch {}
+              return
+            }
+            await doTranslateImage(dataUrl, hoverImg)
+          })()
+          return
+        }
+      } catch {}
+    }
     // 图标点击同样遵循容器展开规则，取消"自动一句"：一律整段
     const expanded = expandContainerToParagraphs(anchor)
     if (expanded.length > 1) {
@@ -326,6 +763,12 @@ export function initShortcut() {
   })
   window.addEventListener('sai:esc', () => {
     const cur = getCurrentAnchor()
-    if (cur && hasCard(cur)) removeCard(cur)
+    const imgCur = getCurrentImageAnchor()
+    const target = imgCur || cur
+    if (target && hasCard(target)) removeCard(target)
+    else {
+      // fallback: if no hover target, try closing last card via remove? Use cur
+      if (cur && hasCard(cur)) removeCard(cur)
+    }
   })
 }
