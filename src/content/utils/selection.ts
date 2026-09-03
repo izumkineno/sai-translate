@@ -577,8 +577,61 @@ export function isValidText(text: string): boolean {
 // 对应 OPENAI_COMPAT_API.md §3.1：image_url.url 支持 data:* 与 http(s) 远端混用。
 export type ImagePayload = { url: string; mode: 'data' | 'url' }
 export type ImagePayloadMode = 'auto' | 'url' | 'base64'
-export function isCrossOriginUrl(src: string): boolean {
+
+// --- 内存 payload 缓存：同 URL+尺寸+模式短时复用，避免重复 canvas 编码/后台拉取 ---
+// key 含 naturalWidth/Height：同一 URL 换断点（srcset/currentSrc 切换）不串味。
+// LRU + 总字节上限 + 5min TTL，会话级 Map，导航即清零（content script 生命周期）。
+type PayloadCacheEntry = { payload: ImagePayload; bytes: number; time: number }
+const PAYLOAD_CACHE = new Map<string, PayloadCacheEntry>()
+const PAYLOAD_CACHE_MAX_ENTRIES = 30
+const PAYLOAD_CACHE_MAX_BYTES = 30 * 1024 * 1024
+const PAYLOAD_CACHE_TTL_MS = 5 * 60 * 1000
+let payloadCacheBytes = 0
+function payloadBytesOf(p: ImagePayload): number {
+  if (p.mode !== 'data') return 0
   try {
+    const b64 = p.url.split(',')[1] || ''
+    return Math.ceil(b64.length * 0.75)
+  } catch { return 0 }
+}
+function payloadCacheKey(src: string, w: number, h: number, mode: ImagePayloadMode): string {
+  return `${mode}|${w}x${h}|${src}`
+}
+function payloadCacheGet(key: string): ImagePayload | null {
+  const e = PAYLOAD_CACHE.get(key)
+  if (!e) return null
+  if (Date.now() - e.time > PAYLOAD_CACHE_TTL_MS) {
+    PAYLOAD_CACHE.delete(key)
+    payloadCacheBytes = Math.max(0, payloadCacheBytes - e.bytes)
+    return null
+  }
+  // LRU 刷新
+  PAYLOAD_CACHE.delete(key)
+  PAYLOAD_CACHE.set(key, e)
+  return e.payload
+}
+function payloadCacheSet(key: string, payload: ImagePayload): void {
+  if (payload.mode !== 'data') return // URL 模式不占内存，只缓存 base64 实物
+  const bytes = payloadBytesOf(payload)
+  if (bytes <= 0 || bytes > 10 * 1024 * 1024) return
+  const prev = PAYLOAD_CACHE.get(key)
+  if (prev) {
+    PAYLOAD_CACHE.delete(key)
+    payloadCacheBytes = Math.max(0, payloadCacheBytes - prev.bytes)
+  }
+  while ((PAYLOAD_CACHE.size >= PAYLOAD_CACHE_MAX_ENTRIES || payloadCacheBytes + bytes > PAYLOAD_CACHE_MAX_BYTES) && PAYLOAD_CACHE.size > 0) {
+    const oldest = PAYLOAD_CACHE.keys().next()
+    if (oldest.done) break
+    const k = oldest.value as string
+    const old = PAYLOAD_CACHE.get(k)
+    PAYLOAD_CACHE.delete(k)
+    if (old) payloadCacheBytes = Math.max(0, payloadCacheBytes - old.bytes)
+  }
+  PAYLOAD_CACHE.set(key, { payload, bytes, time: Date.now() })
+  payloadCacheBytes += bytes
+}
+export function isCrossOriginUrl(src: string): boolean {
+   try {
     const u = new URL(src, location.href)
     return u.origin !== location.origin
   } catch {
@@ -639,14 +692,21 @@ export async function getImagePayloadForTranslation(img: HTMLImageElement, mode:
   const rawSrc = (img.currentSrc || img.src || '').trim()
   if (!rawSrc) return null
   const low = rawSrc.toLowerCase()
-  // 已是 data: 直接返回（不受模式影响）
+  // 已是 data: 直接返回（不受模式影响，不进内存缓存）
   if (low.startsWith('data:image/')) {
     return { url: rawSrc, mode: 'data' }
   }
   if (low.startsWith('blob:')) {
-    // blob 仅能 canvas 转；服务端不支持 blob:
-    const data = await canvasEncodeForPayload(img)
-    if (data) return { url: data, mode: 'data' }
+    // blob 仅能 canvas 转（同页已解码位图，零网络）；服务端不支持 blob:
+    // 可见时再试帧缓冲截图兜底，仍零图片宿主请求
+    try {
+      const data = await canvasEncodeForPayload(img)
+      if (data) return { url: data, mode: 'data' }
+    } catch {}
+    try {
+      const shot = await captureScreenshotPayload(img)
+      if (shot) return shot
+    } catch {}
     return null
   }
   // http(s) 远端
@@ -658,51 +718,57 @@ export async function getImagePayloadForTranslation(img: HTMLImageElement, mode:
   }
   const normalized: ImagePayloadMode = mode === 'url' || mode === 'base64' ? mode : 'auto'
   if (normalized === 'url') {
-    // 强制 URL：直接走远端，交服务端 reqwest 拉取
+    // 强制 URL：直接走远端，交服务端 reqwest 拉取（零扩展流量）
     return { url: rawSrc, mode: 'url' }
   }
+  // 内存缓存：同 URL+自然尺寸+模式短时复用
+  const nw = img.naturalWidth
+  const nh = img.naturalHeight
+  const cacheKey = payloadCacheKey(rawSrc, nw, nh, normalized)
+  const hit = payloadCacheGet(cacheKey)
+  if (hit) return hit
+  const keep = (p: ImagePayload | null): ImagePayload | null => {
+    if (p && p.mode === 'data') payloadCacheSet(cacheKey, p)
+    return p
+  }
+  const sizeOk = (url: string): boolean => {
+    const b64 = url.split(',')[1] || ''
+    return Math.ceil(b64.length * 0.75) <= 10 * 1024 * 1024 && b64.length <= 14_000_000
+  }
   if (normalized === 'base64') {
-    // 强制 base64：优先 canvas，失败尝试后台 fetch 拿 base64，最终回退 URL 保证可译
+    // 强制 base64：内存位图 -> 后台 force-cache -> 帧缓冲截图 -> 回退 URL
     try {
       const data = await canvasEncodeForPayload(img)
-      if (data) {
-        const b64 = (data.split(',')[1] || '')
-        const bytes = Math.ceil(b64.length * 0.75)
-        if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
-          return { url: data, mode: 'data' }
-        }
-      }
+      if (data && sizeOk(data)) return keep({ url: data, mode: 'data' })
     } catch {}
     try {
       const fetched = await fetchImageViaBackground(rawSrc)
-      if (fetched) {
-        const b64 = (fetched.split(',')[1] || '')
-        const bytes = Math.ceil(b64.length * 0.75)
-        if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
-          return { url: fetched, mode: 'data' }
-        }
-        // fetched 过大也尝试返回（已是压缩后），仍按 data 交付
-        return { url: fetched, mode: 'data' }
-      }
+      if (fetched && sizeOk(fetched)) return keep({ url: fetched, mode: 'data' })
+      if (fetched) return keep({ url: fetched, mode: 'data' })
+    } catch {}
+    try {
+      const shot = await captureScreenshotPayload(img)
+      if (shot) return keep(shot)
     } catch {}
     // 彻底失败回退 URL，避免无法翻译
     return { url: rawSrc, mode: 'url' }
   }
-  // auto：跨域或大图走 URL，小图同源优先 base64
-  const cross = isCrossOriginUrl(rawSrc)
-  const large = isLargeImage(img)
-  if (cross || large) {
+  // auto：大图直接 URL（保原分辨率、省内存/流量）；小图走内存链，跨域也不再直返 URL
+  if (isLargeImage(img)) {
     return { url: rawSrc, mode: 'url' }
   }
   try {
     const data = await canvasEncodeForPayload(img)
-    if (data) {
-      const b64 = (data.split(',')[1] || '')
-      const bytes = Math.ceil(b64.length * 0.75)
-      if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
-        return { url: data, mode: 'data' }
-      }
-    }
+    if (data && sizeOk(data)) return keep({ url: data, mode: 'data' })
+  } catch {}
+  try {
+    const fetched = await fetchImageViaBackground(rawSrc)
+    if (fetched && sizeOk(fetched)) return keep({ url: fetched, mode: 'data' })
+    if (fetched) return keep({ url: fetched, mode: 'data' })
+  } catch {}
+  try {
+    const shot = await captureScreenshotPayload(img)
+    if (shot) return keep(shot)
   } catch {}
   return { url: rawSrc, mode: 'url' }
 }
@@ -732,10 +798,55 @@ export function isTranslatableImage(img: HTMLImageElement): boolean {
 
 async function fetchImageViaBackground(src: string): Promise<string | null> {
   try {
-    const resp = await chrome.runtime.sendMessage({ type: 'SAI_FETCH_IMAGE', url: src }) as unknown as { ok?: boolean; dataUrl?: string }
+    const resp = await chrome.runtime.sendMessage({ type: 'SAI_FETCH_IMAGE', url: src, referrer: location.href }) as unknown as { ok?: boolean; dataUrl?: string }
     if (resp && resp.ok && typeof resp.dataUrl === 'string' && resp.dataUrl.startsWith('data:image/')) return resp.dataUrl
   } catch {}
   return null
+}
+
+// --- 合成器帧缓冲兜底：截可见区再按 rect 裁剪，不请求图片宿主，无 CORS/403 ---
+// 全屏截图由 background(SAI_CAPTURE) 透传，裁剪在 content 做（SW 无 DOM）。
+// 精度为渲染分辨率，适合小图 OCR 兜底；大图仍优先 URL 保原分辨率。
+export async function captureScreenshotPayload(img: HTMLImageElement): Promise<ImagePayload | null> {
+  try {
+    if (!img || !(img instanceof HTMLImageElement)) return null
+    const rect = img.getBoundingClientRect()
+    if (!rect || rect.width < 2 || rect.height < 2) return null
+    if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) return null
+    const resp = await chrome.runtime.sendMessage({ type: 'SAI_CAPTURE' }) as unknown as { ok?: boolean; dataUrl?: string }
+    if (!resp || !resp.ok || typeof resp.dataUrl !== 'string' || !resp.dataUrl.startsWith('data:image/')) return null
+    const blob = await (await fetch(resp.dataUrl)).blob()
+    if (!blob || blob.size <= 0 || blob.size > 15 * 1024 * 1024) return null
+    let bitmap: ImageBitmap | null = null
+    try { bitmap = await createImageBitmap(blob) } catch { return null }
+    if (!bitmap || bitmap.width <= 0 || bitmap.height <= 0) return null
+    try {
+      const scaleX = bitmap.width / Math.max(1, window.innerWidth)
+      const scaleY = bitmap.height / Math.max(1, window.innerHeight)
+      const sx = Math.max(0, Math.floor(rect.left * scaleX))
+      const sy = Math.max(0, Math.floor(rect.top * scaleY))
+      const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(rect.width * scaleX)))
+      const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(rect.height * scaleY)))
+      if (sw < 2 || sh < 2) { try { bitmap.close() } catch {} ; return null }
+      const maxOut = 1600
+      const outScale = Math.min(1, maxOut / Math.max(sw, sh))
+      const dw = Math.max(1, Math.round(sw * outScale))
+      const dh = Math.max(1, Math.round(sh * outScale))
+      const canvas = document.createElement('canvas')
+      canvas.width = dw
+      canvas.height = dh
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { try { bitmap.close() } catch {} ; return null }
+      ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, dw, dh)
+      try { bitmap.close() } catch {}
+      let out: string | null = null
+      try { out = canvas.toDataURL('image/jpeg', 0.85) } catch { return null }
+      if (!out) return null
+      const b64 = out.split(',')[1] || ''
+      if (Math.ceil(b64.length * 0.75) > 10 * 1024 * 1024 || b64.length > 14_000_000) return null
+      return { url: out, mode: 'data' }
+    } catch { try { bitmap.close() } catch {} ; return null }
+  } catch { return null }
 }
 
 export function findBestImageAtPoint(x: number, y: number, excludeSel = ''): HTMLImageElement | null {
@@ -904,10 +1015,17 @@ export async function getImageDataURLForTranslation(img: HTMLImageElement): Prom
   }
   let dataUrl: string | null = drawAndEncode(outMime.mime, outMime.quality)
   if (!dataUrl) {
-    // canvas 污点（跨域 pximg.net 等）——走 background fetch 绕过 CORS
+    // canvas 污点（跨域 pximg.net 等）——后台 force-cache 优先命中已加载缓存，不重访宿主
     const fetched = await fetchImageViaBackground(img.src)
-    if (!fetched) return null
-    dataUrl = fetched
+    if (fetched) dataUrl = fetched
+  }
+  if (!dataUrl) {
+    // 仍失败且可见——帧缓冲截图兜底，零图片宿主请求，无 CORS/403
+    try {
+      const shot = await captureScreenshotPayload(img)
+      if (shot && shot.mode === 'data') dataUrl = shot.url
+    } catch {}
+    if (!dataUrl) return null
   }
   if (!dataUrl) return null
   const getBytes = (url: string): { b64Len: number; bytes: number } => {

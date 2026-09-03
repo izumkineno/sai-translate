@@ -48,9 +48,55 @@ function resolveImageHelpers() {
     findBestImageAtPoint: ns['findBestImageAtPoint'] as ((x: number, y: number, exclude?: string) => HTMLImageElement | null) | undefined,
     getImageDataURLForTranslation: ns['getImageDataURLForTranslation'] as ((img: HTMLImageElement) => Promise<string | null>) | undefined,
     getImagePayloadForTranslation: ns['getImagePayloadForTranslation'] as ((img: HTMLImageElement, mode?: ImagePayloadMode) => Promise<{ url: string; mode: 'data' | 'url' } | null>) | undefined,
+    captureScreenshotPayload: ns['captureScreenshotPayload'] as ((img: HTMLImageElement) => Promise<{ url: string; mode: 'data' | 'url' } | null>) | undefined,
     isCrossOriginUrl: ns['isCrossOriginUrl'] as ((src: string) => boolean) | undefined,
     isLargeImage: ns['isLargeImage'] as ((img: HTMLImageElement) => boolean) | undefined,
   }
+}
+
+// 帧缓冲截图兜底（content 侧）：优先复用 selection 导出的裁剪实现，缺失才本地裁剪。
+// 零图片宿主请求，无 CORS/403；仅可见小图有意义，大图/不可见返回 null 交上层回退 URL。
+async function getScreenshotFallback(img: HTMLImageElement): Promise<string | null> {
+  try {
+    const h = resolveImageHelpers()
+    if (h.captureScreenshotPayload) {
+      const p = await h.captureScreenshotPayload(img)
+      if (p && p.mode === 'data' && typeof p.url === 'string' && p.url.startsWith('data:image/')) return p.url
+    }
+  } catch {}
+  try {
+    if (!img || !(img instanceof HTMLImageElement)) return null
+    const rect = img.getBoundingClientRect()
+    if (!rect || rect.width < 2 || rect.height < 2) return null
+    if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) return null
+    const resp = await chrome.runtime.sendMessage({ type: 'SAI_CAPTURE' }) as unknown as { ok?: boolean; dataUrl?: string }
+    if (!resp || !resp.ok || typeof resp.dataUrl !== 'string' || !resp.dataUrl.startsWith('data:image/')) return null
+    const blob = await (await fetch(resp.dataUrl)).blob()
+    if (!blob || blob.size <= 0 || blob.size > 15 * 1024 * 1024) return null
+    const bitmap = await createImageBitmap(blob).catch(() => null)
+    if (!bitmap || bitmap.width <= 0 || bitmap.height <= 0) return null
+    try {
+      const scaleX = bitmap.width / Math.max(1, window.innerWidth)
+      const scaleY = bitmap.height / Math.max(1, window.innerHeight)
+      const sx = Math.max(0, Math.floor(rect.left * scaleX))
+      const sy = Math.max(0, Math.floor(rect.top * scaleY))
+      const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(rect.width * scaleX)))
+      const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(rect.height * scaleY)))
+      if (sw < 2 || sh < 2) { try { bitmap.close() } catch {} ; return null }
+      const outScale = Math.min(1, 1600 / Math.max(sw, sh))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(sw * outScale))
+      canvas.height = Math.max(1, Math.round(sh * outScale))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { try { bitmap.close() } catch {} ; return null }
+      ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+      try { bitmap.close() } catch {}
+      const out = canvas.toDataURL('image/jpeg', 0.85)
+      const b64 = out.split(',')[1] || ''
+      if (Math.ceil(b64.length * 0.75) > 10 * 1024 * 1024) return null
+      return out
+    } catch { try { bitmap.close() } catch {} ; return null }
+  } catch { return null }
 }
 
 async function getPayloadForImage(img: HTMLImageElement): Promise<string | null> {
@@ -69,6 +115,7 @@ async function getPayloadForImage(img: HTMLImageElement): Promise<string | null>
     }
   } catch {}
   // fallback — 按设置模式镜像 selection 逻辑，不依赖新导出
+  // 顺序与 selection 对齐：内存位图 -> 后台 force-cache(含) -> 帧缓冲截图 -> URL
   try {
     const rawSrc = (img.currentSrc || img.src || '').trim()
     if (!rawSrc) return null
@@ -79,6 +126,8 @@ async function getPayloadForImage(img: HTMLImageElement): Promise<string | null>
       const getter = h2.getImageDataURLForTranslation || getImageDataURLFallback
       const d = await getter(img)
       if (d) return d
+      const shot = await getScreenshotFallback(img)
+      if (shot) return shot
       return null
     }
     if (!/^https?:\/\//i.test(rawSrc)) return null
@@ -89,18 +138,19 @@ async function getPayloadForImage(img: HTMLImageElement): Promise<string | null>
       const getter = h3.getImageDataURLForTranslation || getImageDataURLFallback
       const data = await getter(img)
       if (data) return data
+      const shot = await getScreenshotFallback(img)
+      if (shot) return shot
       return rawSrc
     }
-    // auto：跨域/大图走 URL，否则优先 base64
-    const isCross = (() => {
-      try { return new URL(rawSrc, location.href).origin !== location.origin } catch { return false }
-    })()
+    // auto：大图直接 URL 保分辨率；小图走内存链（跨域也不直返 URL，避免服务端 403）
     const isLarge = img.naturalWidth * img.naturalHeight > 1_000_000 || Math.max(img.naturalWidth, img.naturalHeight) > 1600
-    if (isCross || isLarge) return rawSrc
+    if (isLarge) return rawSrc
     const h4 = resolveImageHelpers()
     const getter2 = h4.getImageDataURLForTranslation || getImageDataURLFallback
     const data = await getter2(img)
     if (data) return data
+    const shot = await getScreenshotFallback(img)
+    if (shot) return shot
     return rawSrc
   } catch {}
   return null

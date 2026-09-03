@@ -171,6 +171,91 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse: (
   }
 })
 
+// ---------- runtime.onMessage: SAI_FETCH_IMAGE / SAI_CAPTURE ----------
+// content 内存位图（canvas）失败后的兜底：优先命中缓存、零图片宿主请求。
+// - SAI_FETCH_IMAGE：SW 以扩展源重取，cache:'force-cache' 优先读已加载的内存/磁盘缓存，
+//   credentials:include + referrer 透传降热链 403；15s 超时、10MiB 与 image/* 守卫。
+// - SAI_CAPTURE：截可见区整帧透传，裁剪在 content 做（SW 无 DOM），零图片宿主请求，无 CORS/403。
+chrome.runtime.onMessage.addListener(
+  (
+    message: unknown,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: unknown) => void,
+  ): boolean | void => {
+    if (!message || typeof message !== 'object') return
+    const m = message as Record<string, unknown>
+    const t = m['type']
+    if (t !== 'SAI_FETCH_IMAGE' && t !== 'SAI_CAPTURE') return
+    void (async () => {
+      if (t === 'SAI_CAPTURE') {
+        try {
+          const winId = sender.tab?.windowId
+          const dataUrl = winId != null
+            ? await chrome.tabs.captureVisibleTab(winId, { format: 'jpeg', quality: 90 })
+            : await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 90 })
+          if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+            sendResponse({ ok: true, dataUrl })
+          } else {
+            sendResponse({ ok: false, error: 'capture empty' })
+          }
+        } catch (e) {
+          sendResponse({ ok: false, error: e instanceof Error ? e.message.slice(0, 200) : 'capture failed' })
+        }
+        return
+      }
+      // SAI_FETCH_IMAGE
+      try {
+        const url = typeof m['url'] === 'string' ? (m['url'] as string).trim() : ''
+        if (!/^https?:\/\//i.test(url)) {
+          sendResponse({ ok: false, error: 'bad url' })
+          return
+        }
+        const referrer = typeof m['referrer'] === 'string' && /^https?:\/\//i.test((m['referrer'] as string))
+          ? ((m['referrer'] as string))
+          : (sender.tab?.url && /^https?:\/\//i.test(sender.tab.url) ? sender.tab.url : undefined)
+        const ctl = new AbortController()
+        const timer = setTimeout(() => { try { ctl.abort() } catch {} }, 15_000)
+        try {
+          const res = await fetch(url, {
+            signal: ctl.signal,
+            cache: 'force-cache',
+            credentials: 'include',
+            referrer,
+            referrerPolicy: 'no-referrer-when-downgrade',
+            headers: { Accept: 'image/*' },
+          })
+          if (!res.ok) {
+            sendResponse({ ok: false, error: `HTTP ${res.status}` })
+            return
+          }
+          const ct = (res.headers.get('content-type') || '').split(';')[0]!.trim().toLowerCase()
+          if (ct && !ct.startsWith('image/')) {
+            sendResponse({ ok: false, error: `bad content-type ${ct.slice(0, 60)}` })
+            return
+          }
+          const buf = await res.arrayBuffer()
+          if (!buf || buf.byteLength <= 0 || buf.byteLength > 10 * 1024 * 1024) {
+            sendResponse({ ok: false, error: 'too large' })
+            return
+          }
+          const bytes = new Uint8Array(buf)
+          let binary = ''
+          for (let i = 0; i < bytes.length; i += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+          }
+          const mime = ct && ct.startsWith('image/') ? ct : 'image/jpeg'
+          sendResponse({ ok: true, dataUrl: `data:${mime};base64,${btoa(binary)}` })
+        } finally {
+          clearTimeout(timer)
+        }
+      } catch (e) {
+        sendResponse({ ok: false, error: e instanceof Error ? e.message.slice(0, 200) : 'fetch failed' })
+      }
+    })()
+    return true
+  },
+)
+
 // ---------- runtime.onMessage: SAI_TRANSLATE ----------
 chrome.runtime.onMessage.addListener(
   (
