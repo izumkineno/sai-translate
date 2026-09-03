@@ -99,7 +99,7 @@ function ensureIcon(): HTMLElement {
   const el = document.createElement('div')
   el.dataset.saiHoverIcon = '1'
   el.style.cssText = `
-    position:absolute; width:22px; height:22px; border-radius:6px;
+    position:fixed; width:22px; height:22px; border-radius:6px; margin:0; padding:0;
     background:#111827; color:#fff; display:flex; align-items:center; justify-content:center;
     font-size:12px; line-height:1; box-shadow:0 2px 8px rgba(0,0,0,.2);
     cursor:pointer; z-index:2147483645; pointer-events:auto;
@@ -194,50 +194,26 @@ function removeBlockHighlight(anchor: HTMLElement) {
     anchor.style.outlineOffset = ''
     anchor.style.boxShadow = ''
   }
-  if (anchor.dataset.saiOrigPosition !== undefined) {
-    anchor.style.position = anchor.dataset.saiOrigPosition
-    delete anchor.dataset.saiOrigPosition
-  }
 }
 
 function showIconFor(anchor: HTMLElement) {
   if (!cfg.icon) return
   const icon = ensureIcon()
-  // IMG is void element — cannot append child, use fixed positioning at image rect
-  if (anchor.tagName === 'IMG') {
-    const rect = anchor.getBoundingClientRect()
-    icon.style.position = 'fixed'
-    // reset anchor-relative offsets
-    icon.style.bottom = ''
-    icon.style.left = ''
-    if (cfg.iconPosition === 'top-right') {
-      icon.style.top = `${rect.top + 6}px`
-      icon.style.right = `${window.innerWidth - rect.right + 6}px`
-    } else {
-      icon.style.top = ''
-      icon.style.bottom = `${window.innerHeight - rect.bottom + 6}px`
-      icon.style.right = `${window.innerWidth - rect.right + 6}px`
-    }
-    if (icon.parentElement !== document.body) document.body.appendChild(icon)
-    return
-  }
-  const pos = getComputedStyle(anchor).position
-  if (pos === 'static') {
-    anchor.dataset.saiOrigPosition = anchor.style.position || ''
-    anchor.style.position = 'relative'
-  }
-  icon.style.position = 'absolute'
+  // 统一 fixed + body 挂载：absolute 挂 anchor 内时，祖先 overflow:hidden 会裁掉图标、
+  // 祖先层叠上下文会锁住层级；fixed 以视口 rect 定位彻底免疫这两类
+  const rect = anchor.getBoundingClientRect()
+  icon.style.position = 'fixed'
+  icon.style.left = ''
   if (cfg.iconPosition === 'top-right') {
-    icon.style.top = '6px'
-    icon.style.right = '6px'
+    icon.style.top = `${rect.top + 6}px`
+    icon.style.right = `${window.innerWidth - rect.right + 6}px`
     icon.style.bottom = ''
   } else {
-    icon.style.bottom = '6px'
-    icon.style.right = '6px'
     icon.style.top = ''
+    icon.style.bottom = `${window.innerHeight - rect.bottom + 6}px`
+    icon.style.right = `${window.innerWidth - rect.right + 6}px`
   }
-  icon.style.left = ''
-  if (icon.parentElement !== anchor) anchor.appendChild(icon)
+  if (icon.parentElement !== document.body) document.body.appendChild(icon)
 }
 
 function hideIcon() {
@@ -425,6 +401,19 @@ export function initHover() {
     if ((e.target as HTMLElement)?.dataset?.saiHoverIcon) return
     setCurrentByPoint(e.clientX, e.clientY, target as HTMLElement | null)
   }, { passive: true })
+
+  // fixed 图标不随 anchor 滚动，scroll/resize 时按 currentAnchor 重定位（rAF 节流）
+  let iconRaf = 0
+  const repositionIcon = () => {
+    try { cancelAnimationFrame(iconRaf) } catch {}
+    iconRaf = requestAnimationFrame(() => {
+      if (iconEl && iconEl.isConnected && currentAnchor && currentAnchor.isConnected && cfg.icon) {
+        showIconFor(currentAnchor)
+      }
+    })
+  }
+  window.addEventListener('scroll', repositionIcon, { passive: true, capture: true })
+  window.addEventListener('resize', repositionIcon)
 
   window.addEventListener('sai:clearHover', () => {
     if (currentAnchor) {

@@ -245,7 +245,7 @@ export async function callLLM(baseUrl: string, apiKey: string, model: string, ta
         const err = j['error'] as Record<string, unknown> | undefined
         if (err && typeof err['message'] === 'string') msg = err['message'] as string
       } catch {}
-      throw new Error(msg || `请求失败 ${res.status}`)
+      throw new Error(msg ? `${msg}（HTTP ${res.status} · ${url}）` : `请求失败 HTTP ${res.status} · ${url}`)
     }
     const json = (await res.json()) as unknown
     const content = extractContent(json)
@@ -327,7 +327,7 @@ export async function callVisionLLM(baseUrl: string, apiKey: string, model: stri
         if (err && typeof err['message'] === 'string') msg = err['message'] as string
         else if (typeof j['message'] === 'string') msg = j['message'] as string
       } catch {}
-      throw new Error(msg || `请求失败 ${res.status}`)
+      throw new Error(msg ? `${msg}（HTTP ${res.status} · ${url}）` : `请求失败 HTTP ${res.status} · ${url}`)
     }
     const json = (await res.json()) as unknown
     const result = extractVisionResult(json)

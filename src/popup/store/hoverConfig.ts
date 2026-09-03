@@ -2,6 +2,7 @@ import { createSignal } from 'solid-js'
 
 export type HoverIconPosition = 'top-right' | 'bottom-right'
 export type ImagePayloadMode = 'auto' | 'url' | 'base64'
+export type DisplayMode = 'card' | 'immersive'
 
 export type HoverConfig = {
   hoverEnabled: boolean
@@ -17,6 +18,8 @@ export type HoverConfig = {
   targetLang: string
   shortcutKey: string
   imageMode: ImagePayloadMode
+  displayMode: DisplayMode
+  immersiveMarkerColor: string
 }
 export const DEFAULT_HOVER_CONFIG: HoverConfig = {
   hoverEnabled: true,
@@ -32,6 +35,8 @@ export const DEFAULT_HOVER_CONFIG: HoverConfig = {
   targetLang: '中文',
   shortcutKey: 'KeyQ',
   imageMode: 'auto',
+  displayMode: 'card',
+  immersiveMarkerColor: '#409eff',
 }
 
 // Keep alias for convenience / backwards compat with spec wording
@@ -52,6 +57,8 @@ export const STORAGE_KEYS = {
   targetLang: 'sai_translate_target_lang',
   shortcutKey: 'sai_translate_shortcut_key',
   imageMode: 'sai_translate_image_mode',
+  displayMode: 'sai_translate_display_mode',
+  immersiveMarkerColor: 'sai_translate_immersive_marker_color',
 } as const
 // Also export individual key constants for direct chrome.storage access (content/background)
 export const HOVER_ENABLED_KEY = STORAGE_KEYS.hoverEnabled
@@ -67,6 +74,8 @@ export const INLINE_ENABLED_KEY = STORAGE_KEYS.inlineEnabled
 export const TARGET_LANG_KEY = STORAGE_KEYS.targetLang
 export const SHORTCUT_KEY = STORAGE_KEYS.shortcutKey
 export const IMAGE_MODE_KEY = STORAGE_KEYS.imageMode
+export const DISPLAY_MODE_KEY = STORAGE_KEYS.displayMode
+export const IMMERSIVE_MARKER_COLOR_KEY = STORAGE_KEYS.immersiveMarkerColor
 
 export function getChromeStorage(): chrome.storage.StorageArea | null {
   try {
@@ -96,6 +105,12 @@ function parseIconPosition(v: unknown, fallback: HoverIconPosition): HoverIconPo
 function parseImageMode(v: unknown, fallback: ImagePayloadMode): ImagePayloadMode {
   return v === 'auto' || v === 'url' || v === 'base64' ? v : fallback
 }
+function parseDisplayMode(v: unknown, fallback: DisplayMode): DisplayMode {
+  return v === 'card' || v === 'immersive' ? v : fallback
+}
+function parseMarkerColor(v: unknown, fallback: string): string {
+  return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : fallback
+}
 
 const ALL_KEYS = Object.values(STORAGE_KEYS)
 
@@ -113,6 +128,8 @@ const [inlineEnabled, setInlineEnabled] = createSignal<boolean>(DEFAULT_HOVER_CO
 const [targetLang, setTargetLang] = createSignal<string>(DEFAULT_HOVER_CONFIG.targetLang)
 const [shortcutKey, setShortcutKey] = createSignal<string>(DEFAULT_HOVER_CONFIG.shortcutKey)
 const [imageMode, setImageMode] = createSignal<ImagePayloadMode>(DEFAULT_HOVER_CONFIG.imageMode)
+const [displayMode, setDisplayMode] = createSignal<DisplayMode>(DEFAULT_HOVER_CONFIG.displayMode)
+const [immersiveMarkerColor, setImmersiveMarkerColor] = createSignal<string>(DEFAULT_HOVER_CONFIG.immersiveMarkerColor)
 
 // Combined signal helper — returns snapshot of all fields
 function getHoverConfig(): HoverConfig {
@@ -130,6 +147,8 @@ function getHoverConfig(): HoverConfig {
     targetLang: targetLang(),
     shortcutKey: shortcutKey(),
     imageMode: imageMode(),
+    displayMode: displayMode(),
+    immersiveMarkerColor: immersiveMarkerColor(),
   }
 }
 
@@ -152,6 +171,8 @@ function applyRaw(raw: Record<string, unknown>) {
   setTargetLang(parseString(raw[STORAGE_KEYS.targetLang], DEFAULT_HOVER_CONFIG.targetLang))
   setShortcutKey(parseString(raw[STORAGE_KEYS.shortcutKey], DEFAULT_HOVER_CONFIG.shortcutKey))
   setImageMode(parseImageMode(raw[STORAGE_KEYS.imageMode], DEFAULT_HOVER_CONFIG.imageMode))
+  setDisplayMode(parseDisplayMode(raw[STORAGE_KEYS.displayMode], DEFAULT_HOVER_CONFIG.displayMode))
+  setImmersiveMarkerColor(parseMarkerColor(raw[STORAGE_KEYS.immersiveMarkerColor], DEFAULT_HOVER_CONFIG.immersiveMarkerColor))
 }
 
 export async function loadHoverConfig(): Promise<HoverConfig> {
@@ -200,6 +221,8 @@ function toStorageRecord(cfg: HoverConfig): Record<string, unknown> {
     [STORAGE_KEYS.targetLang]: cfg.targetLang,
     [STORAGE_KEYS.shortcutKey]: cfg.shortcutKey,
     [STORAGE_KEYS.imageMode]: cfg.imageMode,
+    [STORAGE_KEYS.displayMode]: cfg.displayMode,
+    [STORAGE_KEYS.immersiveMarkerColor]: cfg.immersiveMarkerColor,
   }
 }
 function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
@@ -217,6 +240,8 @@ function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
   if (patch.targetLang !== undefined) rec[STORAGE_KEYS.targetLang] = patch.targetLang
   if (patch.shortcutKey !== undefined) rec[STORAGE_KEYS.shortcutKey] = patch.shortcutKey
   if (patch.imageMode !== undefined) rec[STORAGE_KEYS.imageMode] = patch.imageMode
+  if (patch.displayMode !== undefined) rec[STORAGE_KEYS.displayMode] = patch.displayMode
+  if (patch.immersiveMarkerColor !== undefined) rec[STORAGE_KEYS.immersiveMarkerColor] = patch.immersiveMarkerColor
   return rec
 }
 
@@ -252,6 +277,8 @@ function applyPatchToSignals(patch: Partial<HoverConfig>) {
   if (patch.targetLang !== undefined) setTargetLang(patch.targetLang)
   if (patch.shortcutKey !== undefined) setShortcutKey(patch.shortcutKey)
   if (patch.imageMode !== undefined) setImageMode(patch.imageMode)
+  if (patch.displayMode !== undefined) setDisplayMode(patch.displayMode)
+  if (patch.immersiveMarkerColor !== undefined) setImmersiveMarkerColor(patch.immersiveMarkerColor)
 }
 
 export async function updateHoverConfig(patch: Partial<HoverConfig>): Promise<HoverConfig> {
@@ -308,6 +335,10 @@ export function useHoverConfig() {
     shortcutKey,
     imageMode,
     setImageMode,
+    displayMode,
+    setDisplayMode,
+    immersiveMarkerColor,
+    setImmersiveMarkerColor,
     loadHoverConfig,
     load,
     persistHoverConfig,
@@ -347,6 +378,10 @@ export {
   setShortcutKey,
   imageMode,
   setImageMode,
+  displayMode,
+  setDisplayMode,
+  immersiveMarkerColor,
+  setImmersiveMarkerColor,
   hoverConfig,
   getHoverConfig,
 }

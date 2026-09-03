@@ -8,6 +8,46 @@ const HOST_CLASS = 'sai-translate-inline'
 const cardMap = new Map<HTMLElement, HTMLElement>() // anchor -> host (row-below card)
 const observerMap = new Map<HTMLElement, MutationObserver>()
 const imageOverlayMap = new Map<HTMLElement, HTMLElement>() // anchor(img) -> overlay (fixed covering)
+// --- 浮窗盔甲：Shadow 只保护卡片内部，host 本体是页面流里的裸 div ---
+// 被盖三路径：页面 sticky/fixed 头滚过盖住行下卡片；祖先层叠上下文（transform/filter/
+// opacity）把卡片锁在低层；通用选择器（div:empty{display:none}——host light-DOM 为空，
+// 正中 :empty；div{overflow:hidden} 等）直接污染 host。
+// position:relative 无偏移，不影响行下流式布局；updateCard 经 createHost 全覆盖。
+function applyHostArmor(host: HTMLElement): void {
+  const s = host.style
+  s.setProperty('display', 'block', 'important')
+  s.setProperty('position', 'relative', 'important')
+  s.setProperty('z-index', '2147483647', 'important')
+  s.setProperty('isolation', 'isolate', 'important')
+  s.setProperty('overflow', 'visible', 'important')
+  s.setProperty('visibility', 'visible', 'important')
+  s.setProperty('opacity', '1', 'important')
+  s.setProperty('float', 'none', 'important')
+  s.setProperty('transform', 'none', 'important')
+  s.setProperty('filter', 'none', 'important')
+  s.setProperty('clip-path', 'none', 'important')
+  s.setProperty('-webkit-mask', 'none', 'important')
+  s.setProperty('mask', 'none', 'important')
+  s.setProperty('max-width', 'none', 'important')
+  s.setProperty('animation', 'none', 'important')
+  s.setProperty('transition', 'none', 'important')
+}
+// overlay 是功能性 fixed 覆盖层：display/visibility 由显隐逻辑驱动，不锁；
+// 只锁定位与盒模型（页面 div{position:absolute} 会直接改掉 fixed 造成错位/被盖）。
+function applyOverlayArmor(overlay: HTMLElement): void {
+  const s = overlay.style
+  s.setProperty('position', 'fixed', 'important')
+  s.setProperty('z-index', '2147483645', 'important')
+  s.setProperty('overflow', 'hidden', 'important')
+  s.setProperty('pointer-events', 'none', 'important')
+  s.setProperty('box-sizing', 'border-box', 'important')
+  s.setProperty('line-height', '0', 'important')
+  s.setProperty('margin', '0', 'important')
+  s.setProperty('padding', '0', 'important')
+  s.setProperty('transform', 'none', 'important')
+  s.setProperty('isolation', 'isolate', 'important')
+}
+
 // --- 一键关闭悬浮条 ---
 let closeAllHost: HTMLElement | null = null
 let closeAllCountEl: HTMLElement | null = null
@@ -15,7 +55,7 @@ let closeAllCountEl: HTMLElement | null = null
 function createCloseAllHost(): HTMLElement {
   const host = document.createElement('div')
   host.setAttribute('data-sai-close-all', '1')
-  host.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:2147483647;display:none;pointer-events:auto;'
+  host.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:2147483647;display:none;pointer-events:auto;margin:0;padding:0;'
   const shadow = host.attachShadow({ mode: 'open' })
   const style = document.createElement('style')
   style.textContent = `
@@ -127,18 +167,14 @@ function createOrUpdateImageOverlay(anchor: HTMLImageElement, dataUrl: string): 
     if (img) img.src = dataUrl
     updateOverlayPosition(anchor, overlay)
     overlay.style.display = 'block'
+    // 提到 body 末尾：同 z 的页面节点若后挂载会盖住 overlay
+    try { document.body.appendChild(overlay) } catch {}
     return overlay
   }
   overlay = document.createElement('div')
   overlay.setAttribute('data-sai-overlay', '1')
-  overlay.style.position = 'fixed'
-  overlay.style.zIndex = '2147483645'
-  overlay.style.pointerEvents = 'none'
-  overlay.style.overflow = 'hidden'
-  overlay.style.boxSizing = 'border-box'
+  applyOverlayArmor(overlay)
   overlay.style.background = '#ffffff'
-  overlay.style.lineHeight = '0'
-  // 初始尺寸按 anchor
   updateOverlayPosition(anchor, overlay)
   const img = document.createElement('img')
   img.src = dataUrl
@@ -201,6 +237,7 @@ function createHost(): HTMLElement {
   host.setAttribute(CARD_ATTR, '1')
   host.style.display = 'block'
   host.style.margin = '6px 0 10px'
+  applyHostArmor(host)
   return host
 }
 
@@ -398,6 +435,130 @@ function mkCloseBtnWrap(onClose: () => void): HTMLElement {
   return w
 }
 
+// --- 沉浸式双语（手法借鉴 FluentRead appendBilingualTranslation + page.css） ---
+// 核心：译文 span 直接挂进原文 anchor 内部 → 字体/颜色/字号/行高全继承，零成本“复刻样式”，
+// 不拷贝 computed style、不改原文；左侧色标用 ::before 伪元素（零新增元素）；
+// translate=no 防页面翻译器二次处理；data-sai-immersive 做幂等与状态机。
+// 新增元素总共 2 个：译文 span + hover 才显现的关闭按钮，最大限度不干扰版式。
+const IMM_ATTR = 'data-sai-immersive'
+const IMM_STYLE_ID = 'sai-immersive-style'
+const IMM_MARKER_VAR = '--sai-imm-marker'
+const DISPLAY_MODE_KEY = 'sai_translate_display_mode'
+const IMM_MARKER_KEY = 'sai_translate_immersive_marker_color'
+export type DisplayMode = 'card' | 'immersive'
+type ImmersiveStatus = 'loading' | 'success' | 'error'
+
+// 模块级偏好缓存：injectLoading 刷新 + storage 监听实时跟随，updateCard 同步可用
+let displayModeNow: DisplayMode = 'card'
+let markerNow = '#409eff'
+let immStoreHooked = false
+
+function applyMarkerColor(marker: string): void {
+  try { document.documentElement.style.setProperty(IMM_MARKER_VAR, marker) } catch {}
+}
+function parseMarkerColor(v: unknown): string {
+  return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : '#409eff'
+}
+async function refreshDisplayPrefs(): Promise<void> {
+  try {
+    const raw = await chrome.storage.local.get([DISPLAY_MODE_KEY, IMM_MARKER_KEY])
+    displayModeNow = raw[DISPLAY_MODE_KEY] === 'immersive' ? 'immersive' : 'card'
+    markerNow = parseMarkerColor(raw[IMM_MARKER_KEY])
+  } catch {
+    displayModeNow = 'card'
+    markerNow = '#409eff'
+  }
+  applyMarkerColor(markerNow)
+  hookImmersiveStore()
+}
+function hookImmersiveStore(): void {
+  if (immStoreHooked) return
+  immStoreHooked = true
+  try {
+    chrome.storage.onChanged.addListener((changes) => {
+      try {
+        const dm = changes[DISPLAY_MODE_KEY]?.newValue
+        if (dm !== undefined) displayModeNow = dm === 'immersive' ? 'immersive' : 'card'
+        const c = changes[IMM_MARKER_KEY]?.newValue
+        if (typeof c === 'string') {
+          markerNow = parseMarkerColor(c)
+          applyMarkerColor(markerNow)
+        }
+      } catch {}
+    })
+  } catch {}
+}
+
+function ensureImmersiveStyle(): void {
+  if (document.getElementById(IMM_STYLE_ID)) return
+  const s = document.createElement('style')
+  s.id = IMM_STYLE_ID
+  s.textContent = `
+    [${IMM_ATTR}] { display:block; margin:6px 0 10px; padding-left:12px; color:inherit; background:transparent; overflow-wrap:break-word; }
+    [${IMM_ATTR}]::before { content:""; position:absolute; left:0; top:0.2em; bottom:0.2em; width:3px; border-radius:999px; background:var(${IMM_MARKER_VAR},#409eff); pointer-events:none; }
+    [${IMM_ATTR}="loading"] { opacity:.55; animation:sai-imm-pulse 1.1s ease-in-out infinite; }
+    @keyframes sai-imm-pulse { 0%,100% { opacity:.35; } 50% { opacity:.7; } }
+    [${IMM_ATTR}="error"] { color:#b91c1c; cursor:pointer; }
+    [${IMM_ATTR}-close] { position:absolute; top:0; right:0; width:20px; height:20px; border:none; border-radius:6px; background:#111827; color:#fff; font-size:12px; line-height:1; cursor:pointer; opacity:0; transition:opacity .15s; padding:0; margin:0; }
+    [${IMM_ATTR}]:hover > [${IMM_ATTR}-close] { opacity:.85; }
+  `
+  // [${IMM_ATTR}-close] 展开为 [data-sai-immersive-close]，与关闭按钮属性一致
+  try { document.head.appendChild(s) } catch { try { document.documentElement.appendChild(s) } catch {} }
+}
+
+function isImmersiveHost(el: HTMLElement): boolean {
+  return el.hasAttribute(IMM_ATTR)
+}
+
+function buildImmersive(anchor: HTMLElement, status: ImmersiveStatus, text: string): HTMLElement {
+  ensureImmersiveStyle()
+  const wrap = document.createElement('span')
+  wrap.setAttribute(CARD_ATTR, '1')
+  wrap.setAttribute(IMM_ATTR, status)
+  wrap.setAttribute('translate', 'no')
+  // relative 必须内联：::before 与关闭按钮 absolute 定位锚点，且不被页面样式表覆盖
+  wrap.style.position = 'relative'
+  const body = document.createElement('span')
+  body.textContent = status === 'loading' ? '翻译中…' : text
+  wrap.appendChild(body)
+  if (status === 'error') wrap.title = '点击重试'
+  const close = document.createElement('button')
+  close.setAttribute(`${IMM_ATTR}-close`, '1')
+  close.type = 'button'
+  close.textContent = '×'
+  close.title = '关闭译文'
+  close.addEventListener('click', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    removeCard(anchor)
+  })
+  wrap.appendChild(close)
+  return wrap
+}
+
+// 原地刷新：保留节点身份，只换状态与文本（幂等，不抖动版式）
+function refreshImmersive(host: HTMLElement, status: ImmersiveStatus, text: string): void {
+  host.setAttribute(IMM_ATTR, status)
+  const body = host.firstElementChild
+  if (body instanceof HTMLElement) body.textContent = status === 'loading' ? '翻译中…' : text
+  host.title = status === 'error' ? '点击重试' : ''
+}
+
+// 最新重试闭包存 WeakMap，监听器只绑一次（updateCard 每次传的新闭包语义等价：同 text + anchor）
+const immersiveRetryMap = new WeakMap<HTMLElement, () => void>()
+function setImmersiveRetry(host: HTMLElement, fn: () => void): void {
+  immersiveRetryMap.set(host, fn)
+  if (!host.dataset.saiImmRetry) {
+    host.dataset.saiImmRetry = '1'
+    host.addEventListener('click', (e) => {
+      const t = e.target
+      if (t instanceof HTMLElement && t.hasAttribute(`${IMM_ATTR}-close`)) return
+      const f = immersiveRetryMap.get(host)
+      if (f) f()
+    })
+  }
+}
+
 function isInlineEnabledCache(): Promise<boolean> {
   return chrome.storage.local.get(['sai_translate_inline_enabled']).then((r) => {
     const v = r['sai_translate_inline_enabled']
@@ -409,6 +570,14 @@ function isInlineEnabledCache(): Promise<boolean> {
 export async function injectLoading(anchor: HTMLElement): Promise<HTMLElement> {
   const enabled = await isInlineEnabledCache()
   if (!enabled) throw new Error('行下翻译已关闭，请在配置页开启')
+  await refreshDisplayPrefs()
+  // 图片锚点永远走卡片 + overlay（行下复刻对 IMG 无意义）
+  if (displayModeNow === 'immersive' && anchor.tagName !== 'IMG') {
+    const wrap = buildImmersive(anchor, 'loading', '')
+    placeAfter(anchor, wrap)
+    observe(anchor, wrap)
+    return wrap
+  }
   const host = createHost()
   const onCopy = () => {}
   const onRetr = () => {}
@@ -420,10 +589,29 @@ export async function injectLoading(anchor: HTMLElement): Promise<HTMLElement> {
 }
 
 export function updateCard(anchor: HTMLElement, status: CardStatus, text: string, meta: string, onRetranslate: () => void, annotatedDataUrl?: string) {
-  const host = cardMap.get(anchor)
-  if (!host) return
-  // detach old shadow by replacing host
-  const newHost = createHost()
+  const wantImmersive = displayModeNow === 'immersive' && anchor.tagName !== 'IMG'
+  let host = cardMap.get(anchor)
+  // 形态不符（设置页中途切换显示模式）→ 拆掉按新形态重建
+  if (host && isImmersiveHost(host) !== wantImmersive) {
+    try { host.remove() } catch {}
+    cardMap.delete(anchor)
+    const oldObs = observerMap.get(anchor)
+    if (oldObs) { oldObs.disconnect(); observerMap.delete(anchor) }
+    host = undefined
+  }
+  if (wantImmersive) {
+    const immStatus: ImmersiveStatus = status === 'error' ? 'error' : status === 'loading' ? 'loading' : 'success'
+    if (host) {
+      refreshImmersive(host, immStatus, text)
+      if (immStatus === 'error') setImmersiveRetry(host, onRetranslate)
+      return
+    }
+    const wrap = buildImmersive(anchor, immStatus, text)
+    if (immStatus === 'error') setImmersiveRetry(wrap, onRetranslate)
+    placeAfter(anchor, wrap)
+    observe(anchor, wrap)
+    return
+  }
   const onCopy = async () => {
     try { await navigator.clipboard.writeText(text) } catch {
       const ta = document.createElement('textarea')
@@ -435,6 +623,16 @@ export function updateCard(anchor: HTMLElement, status: CardStatus, text: string
     }
   }
   const onClose = () => removeCard(anchor)
+  if (!host) {
+    // 无 host（loading 与结果竞态/切模式后）：直接建卡，语义同 injectBelow
+    const newHost = createHost()
+    buildShadow(newHost, status, text, meta, onCopy, onRetranslate, onClose, annotatedDataUrl, anchor)
+    placeAfter(anchor, newHost)
+    observe(anchor, newHost)
+    return
+  }
+  // detach old shadow by replacing host
+  const newHost = createHost()
   buildShadow(newHost, status, text, meta, onCopy, onRetranslate, onClose, annotatedDataUrl, anchor)
   host.replaceWith(newHost)
   cardMap.set(anchor, newHost)
@@ -539,7 +737,8 @@ export function hasCard(anchor: HTMLElement): boolean {
 
 export function toggleInline(): void {
   const anyVisible = Array.from(cardMap.values()).some((h) => h.style.display !== 'none')
-  for (const h of cardMap.values()) h.style.display = anyVisible ? 'none' : 'block'
+  // 卡片 host 的 display 被盔甲锁了 important，普通赋值无效，必须同级 important
+  for (const h of cardMap.values()) h.style.setProperty('display', anyVisible ? 'none' : 'block', 'important')
   // 图片 overlay 同步显隐
   for (const ov of imageOverlayMap.values()) ov.style.display = anyVisible ? 'none' : 'block'
 }

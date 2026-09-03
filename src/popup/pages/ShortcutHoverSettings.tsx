@@ -6,6 +6,7 @@ import {
   type HoverIconPosition,
   type ImagePayloadMode,
 } from '../store/hoverConfig'
+import type { DisplayMode } from '../store/hoverConfig'
 export default function ShortcutHoverSettings() {
   const [hoverEnabled, setHoverEnabled] = createSignal(DEFAULT_HOVER_CONFIG.hoverEnabled)
   const [hoverHighlight, setHoverHighlight] = createSignal(DEFAULT_HOVER_CONFIG.hoverHighlight)
@@ -20,6 +21,8 @@ export default function ShortcutHoverSettings() {
   const [targetLang, setTargetLang] = createSignal(DEFAULT_HOVER_CONFIG.targetLang)
   const [shortcutKey, setShortcutKey] = createSignal(DEFAULT_HOVER_CONFIG.shortcutKey)
   const [imageMode, setImageMode] = createSignal<ImagePayloadMode>(DEFAULT_HOVER_CONFIG.imageMode)
+  const [displayMode, setDisplayMode] = createSignal<DisplayMode>('card')
+  const [markerColor, setMarkerColor] = createSignal('#409eff')
   const [saving, setSaving] = createSignal(false)
   const [msg, setMsg] = createSignal('')
   onMount(async () => {
@@ -37,6 +40,8 @@ export default function ShortcutHoverSettings() {
     setTargetLang(cfg.targetLang)
     setShortcutKey(cfg.shortcutKey)
     setImageMode(cfg.imageMode)
+    setDisplayMode(cfg.displayMode)
+    setMarkerColor(cfg.immersiveMarkerColor)
   })
 
   const save = async (patch: Record<string, unknown>) => {
@@ -152,6 +157,46 @@ export default function ShortcutHoverSettings() {
           <div style={{ 'font-size': '11px', color: '#6b7280', 'line-height': '1.4' }}>
             远端地址走后端 <code>reqwest</code> 拉取（跳过 CORS），超时 40s；base64 过大（&gt;10MiB）自动回退 URL，对应服务端 §3.1 混用
           </div>
+        </div>
+      </div>
+
+      {/* 译文展示 */}
+      <div class="n-card n-card--bordered">
+        <div class="n-card-header">
+          <span class="n-card-header__title">译文展示</span>
+          <span class="n-card-header__extra">窗口 / 沉浸式切换</span>
+        </div>
+        <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
+          <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
+            <span style={{ width: '120px' }}>显示模式</span>
+            <select
+              value={displayMode()}
+              onChange={(e) => {
+                const v = e.currentTarget.value as DisplayMode
+                setDisplayMode(v)
+                void save({ displayMode: v })
+              }}
+              class="n-input"
+              style={{ flex: '1', padding: '6px 8px', 'border-radius': '6px', border: '1px solid #e5e7eb' }}
+            >
+              <option value="card">翻译窗口（独立卡片，可复制/重译）</option>
+              <option value="immersive">沉浸式双语（复刻原文样式 + 左侧色标）</option>
+            </select>
+          </label>
+          <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
+            <span style={{ width: '120px' }}>头标颜色</span>
+            <input
+              type="color"
+              value={markerColor()}
+              onInput={(e) => {
+                const v = e.currentTarget.value
+                setMarkerColor(v)
+                void save({ immersiveMarkerColor: v })
+              }}
+              style={{ width: '60px', height: '32px', padding: '2px', border: '1px solid #e5e7eb', 'border-radius': '6px' }}
+            />
+            <span style={{ 'font-size': '12px', color: '#6b7280' }}>{markerColor()}（沉浸式左侧色标，hover 显示 × 关闭）</span>
+          </label>
         </div>
       </div>
 
