@@ -400,8 +400,9 @@ chrome.runtime.onMessage.addListener(
           }
           capturedBaseUrl = source.baseUrl
 
+          const preserveMarkup = (req as { html?: unknown }).html === true
           const translated = await Promise.race([
-            callLLM(source.baseUrl, source.apiKey, source.model, target, text, controller.signal),
+            callLLM(source.baseUrl, source.apiKey, source.model, target, text, controller.signal, preserveMarkup ? { preserveMarkup: true } : undefined),
             timeoutPromise,
           ])
 

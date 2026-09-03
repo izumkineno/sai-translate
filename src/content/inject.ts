@@ -1,3 +1,4 @@
+import { isTableStructural, outermostTable, closestCell } from './utils/selection'
 // Shadow DOM row-below injection, multi-card, MutationObserver + 一键关闭悬浮条
 
 type CardStatus = 'loading' | 'success' | 'error' | 'empty'
@@ -8,6 +9,11 @@ const HOST_CLASS = 'sai-translate-inline'
 const cardMap = new Map<HTMLElement, HTMLElement>() // anchor -> host (row-below card)
 const observerMap = new Map<HTMLElement, MutationObserver>()
 const imageOverlayMap = new Map<HTMLElement, HTMLElement>() // anchor(img) -> overlay (fixed covering)
+// 已有译文集合：仅成功态落盘时置位，loading/error/关闭时清除；重复翻译命中即转关闭
+const translatedAnchors = new WeakSet<HTMLElement>()
+export function hasTranslatedCard(anchor: HTMLElement): boolean {
+  return translatedAnchors.has(anchor)
+}
 // --- 浮窗盔甲：Shadow 只保护卡片内部，host 本体是页面流里的裸 div ---
 // 被盖三路径：页面 sticky/fixed 头滚过盖住行下卡片；祖先层叠上下文（transform/filter/
 // opacity）把卡片锁在低层；通用选择器（div:empty{display:none}——host light-DOM 为空，
@@ -571,7 +577,8 @@ export async function injectLoading(anchor: HTMLElement): Promise<HTMLElement> {
   const enabled = await isInlineEnabledCache()
   if (!enabled) throw new Error('行下翻译已关闭，请在配置页开启')
   await refreshDisplayPrefs()
-  // 图片锚点永远走卡片 + overlay（行下复刻对 IMG 无意义）
+  // 新一轮翻译开始：旧译文即将被替换，先清除成功标记（失败/关闭路径同样清除）
+  translatedAnchors.delete(anchor)
   if (displayModeNow === 'immersive' && anchor.tagName !== 'IMG') {
     const wrap = buildImmersive(anchor, 'loading', '')
     placeAfter(anchor, wrap)
@@ -601,6 +608,8 @@ export function updateCard(anchor: HTMLElement, status: CardStatus, text: string
   }
   if (wantImmersive) {
     const immStatus: ImmersiveStatus = status === 'error' ? 'error' : status === 'loading' ? 'loading' : 'success'
+    if (immStatus === 'success') translatedAnchors.add(anchor)
+    else translatedAnchors.delete(anchor)
     if (host) {
       refreshImmersive(host, immStatus, text)
       if (immStatus === 'error') setImmersiveRetry(host, onRetranslate)
@@ -612,6 +621,8 @@ export function updateCard(anchor: HTMLElement, status: CardStatus, text: string
     observe(anchor, wrap)
     return
   }
+  if (status === 'success') translatedAnchors.add(anchor)
+  else translatedAnchors.delete(anchor)
   const onCopy = async () => {
     try { await navigator.clipboard.writeText(text) } catch {
       const ta = document.createElement('textarea')
@@ -645,58 +656,145 @@ export function updateCard(anchor: HTMLElement, status: CardStatus, text: string
     observe(anchor, newHost)
   }
 }
-function placeAfter(anchor: HTMLElement, host: HTMLElement) {
-  const isCell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
-  if (isCell) {
-    const last = anchor.lastElementChild as HTMLElement | null
-    if (last && last.getAttribute(CARD_ATTR) === '1') {
-      last.replaceWith(host)
-    } else {
-      anchor.appendChild(host)
+// --- 自有变更忽略 + 视口锚点（抄 KISS：withIgnoredMutations + withViewportAnchor） ---
+// observe 只负责“译文被外力移除后重挂”；自家插入/删除不再触发回调自激。
+// 插入译文改变文档高度时，用视口中点锚点补偿滚动，避免长页表格批量翻译时跳屏。
+const ignoredMutationTargets = new WeakSet<Node>()
+function withIgnoredMutations(targets: Array<Node | null | undefined>, fn: () => void): void {
+  const valid = targets.filter((t): t is Node => t instanceof Node)
+  valid.forEach((t) => { try { ignoredMutationTargets.add(t) } catch {} })
+  try { fn() } finally {
+    // observer 回调异步送达，下一轮再放行
+    void Promise.resolve().then(() => {
+      setTimeout(() => { valid.forEach((t) => { try { ignoredMutationTargets.delete(t) } catch {} }) }, 0)
+    })
+  }
+}
+function normalizeViewportAnchor(el: Element | null): HTMLElement | null {
+  if (!el || !(el instanceof HTMLElement)) return null
+  // 落在自有译文容器内 → 归一到原文锚点（cardMap 量小可遍历）
+  try {
+    for (const [anchor, host] of cardMap) {
+      if (host === el || host.contains(el)) return anchor
     }
-  } else {
-    const prev = anchor.nextElementSibling as HTMLElement | null
-    if (prev && prev.getAttribute(CARD_ATTR) === '1') {
-      prev.replaceWith(host)
-    } else {
-      // For void IMG, ensure insertion after the image even if parent is inline
-      try {
-        anchor.after(host)
-      } catch {
-        // fallback: parent insert
-        const parent = anchor.parentElement
-        if (parent) {
-          try { parent.insertBefore(host, anchor.nextSibling) } catch { anchor.appendChild(host) }
-        } else {
-          document.body.appendChild(host)
+  } catch {}
+  return el
+}
+function withViewportAnchor(fn: () => void): void {
+  let anchor: HTMLElement | null = null
+  let top = 0
+  try {
+    if (typeof document.elementFromPoint === 'function' && typeof window.scrollBy === 'function') {
+      const x = Math.max(0, Math.floor(window.innerWidth / 2))
+      for (const ratio of [0.5, 0.33, 0.66]) {
+        const y = Math.max(0, Math.min(window.innerHeight - 1, Math.floor(window.innerHeight * ratio)))
+        const found = normalizeViewportAnchor(document.elementFromPoint(x, y))
+        if (found?.isConnected) {
+          const rect = found.getBoundingClientRect()
+          if (rect.width || rect.height) { anchor = found; top = rect.top; break }
         }
       }
     }
+  } catch {}
+  try { fn() } finally {
+    try {
+      if (anchor?.isConnected) {
+        const offset = anchor.getBoundingClientRect().top - top
+        if (Math.abs(offset) > 0.5) window.scrollBy(0, offset)
+      }
+    } catch {}
   }
-  cardMap.set(anchor, host)
-  try { updateCloseAllButton() } catch {}
+}
+function placeAfter(anchor: HTMLElement, host: HTMLElement) {
+  withViewportAnchor(() => {
+    const isCell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
+    withIgnoredMutations([isCell ? anchor : anchor.parentElement], () => {
+      if (isCell) {
+        const last = anchor.lastElementChild as HTMLElement | null
+        if (last && last.getAttribute(CARD_ATTR) === '1') {
+          last.replaceWith(host)
+        } else {
+          anchor.appendChild(host)
+        }
+        cardMap.set(anchor, host)
+        try { updateCloseAllButton() } catch {}
+        return
+      }
+      // 表格结构锚点（TR/section/TABLE）：DOM API 直插虽合法，但 span 做 tbody/tr 子级会走
+      // 匿名表格盒、渲染怪异 → 统一落到最外层 TABLE 之后的有效流式位置
+      if (isTableStructural(anchor)) {
+        const table = outermostTable(anchor) ?? (anchor.tagName === 'TABLE' ? anchor : null)
+        const ref = table ?? anchor
+        try {
+          const prev = ref.nextElementSibling as HTMLElement | null
+          if (prev && prev.getAttribute(CARD_ATTR) === '1') prev.replaceWith(host)
+          else ref.after(host)
+        } catch {
+          try {
+            const cell = closestCell(anchor)
+            if (cell) cell.appendChild(host)
+            else document.body.appendChild(host)
+          } catch { try { document.body.appendChild(host) } catch {} }
+        }
+        cardMap.set(anchor, host)
+        try { updateCloseAllButton() } catch {}
+        return
+      }
+      const prev = anchor.nextElementSibling as HTMLElement | null
+      if (prev && prev.getAttribute(CARD_ATTR) === '1') {
+        prev.replaceWith(host)
+      } else {
+        // For void IMG, ensure insertion after the image even if parent is inline
+        try {
+          anchor.after(host)
+        } catch {
+          // fallback: parent insert
+          const parent = anchor.parentElement
+          if (parent) {
+            try { parent.insertBefore(host, anchor.nextSibling) } catch { anchor.appendChild(host) }
+          } else {
+            document.body.appendChild(host)
+          }
+        }
+      }
+      cardMap.set(anchor, host)
+      try { updateCloseAllButton() } catch {}
+    })
+  })
 }
 
 function observe(anchor: HTMLElement, host: HTMLElement) {
   const isCell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
-  const parent = isCell ? anchor : anchor.parentElement
+  const structural = isTableStructural(anchor)
+  const table = structural ? (outermostTable(anchor) ?? (anchor.tagName === 'TABLE' ? anchor : null)) : null
+  const parent = isCell ? anchor : (table?.parentElement ?? anchor.parentElement)
   if (!parent) return
-  const obs = new MutationObserver(() => {
+  const reattach = () => {
+    try {
+      if (isCell) { anchor.appendChild(host); return }
+      if (structural && table) {
+        const prev = table.nextElementSibling as HTMLElement | null
+        if (prev && prev.getAttribute(CARD_ATTR) === '1') return
+        table.after(host)
+        return
+      }
+      anchor.after(host)
+    } catch {
+      try {
+        const p = (structural && table ? table.parentElement : anchor.parentElement) ?? anchor.parentElement
+        if (p) p.insertBefore(host, (structural && table ? table.nextSibling : anchor.nextSibling))
+      } catch {}
+    }
+  }
+  const obs = new MutationObserver((mutations) => {
+    try {
+      if (mutations.length > 0 && mutations.every((m) => ignoredMutationTargets.has(m.target))) return
+    } catch {}
     if (!host.isConnected) {
       setTimeout(() => {
         if (anchor.isConnected && !host.isConnected) {
           const cur = cardMap.get(anchor)
-          if (cur === host) {
-            try {
-              if (isCell) anchor.appendChild(host)
-              else anchor.after(host)
-            } catch {
-              try {
-                const p = anchor.parentElement
-                if (p) p.insertBefore(host, anchor.nextSibling)
-              } catch {}
-            }
-          }
+          if (cur === host) reattach()
         }
       }, 200)
     }
@@ -704,10 +802,157 @@ function observe(anchor: HTMLElement, host: HTMLElement) {
   obs.observe(parent, { childList: true })
   observerMap.set(anchor, obs)
 }
-export function removeCard(anchor: HTMLElement) {
+// --- 沉浸式克隆翻译（原文只读，译文 clone 挂原文下面） ---
+// 上一代原位替换改原文文本；现改为深克隆 anchor → clone 内文本节点按序填译文 →
+// 插到原文下面。clone 带相同 tag/class/inline style 进同样位置，字体颜色 CSS 天然复刻；
+// <a> 的 href/class 原样带过去，原生可点；原文一个字节不动。
+// 色标打在 clone 本体的 ::before；关闭钮是唯一新增元素（hover 显现）；关闭 = 删 clone。
+// id 去重（防重复 id），嵌套的旧译文节点从 clone 里摘掉；表格锚点不克隆（非法嵌套）。
+const INPLACE_ATTR = 'data-sai-inplace'
+const INPLACE_STYLE_ID = 'sai-inplace-style'
+const inplaceBelowMap = new WeakMap<HTMLElement, HTMLElement[]>()
+
+function ensureInplaceStyle(): void {
+  if (document.getElementById(INPLACE_STYLE_ID)) return
+  const s = document.createElement('style')
+  s.id = INPLACE_STYLE_ID
+  s.textContent = `
+    [${INPLACE_ATTR}="1"] { padding-left:10px; }
+    [${INPLACE_ATTR}]::before { content:""; position:absolute; left:0; top:0.2em; bottom:0.2em; width:3px; border-radius:999px; background:var(${IMM_MARKER_VAR},#409eff); pointer-events:none; }
+    [${INPLACE_ATTR}]:hover > [${IMM_ATTR}-close] { opacity:.85; }
+    [${INPLACE_ATTR}]:hover + [${IMM_ATTR}-close] { opacity:.85; }
+  `
+  try { document.head.appendChild(s) } catch { try { document.documentElement.appendChild(s) } catch {} }
+}
+
+const INPLACE_UNCLONABLE = new Set(['TD', 'TH', 'TR', 'TABLE', 'TBODY', 'THEAD', 'TFOOT'])
+export function isClonableAnchor(anchor: HTMLElement): boolean {
+  return !INPLACE_UNCLONABLE.has(anchor.tagName)
+}
+
+// loading 态复用块级沉浸式 wrapper（原文零触碰）
+export function showBelowLoading(anchor: HTMLElement): HTMLElement {
+  translatedAnchors.delete(anchor)
+  ensureInplaceStyle()
+  hookImmersiveStore()
+  const wrap = buildImmersive(anchor, 'loading', '')
+  placeAfter(anchor, wrap)
+  observe(anchor, wrap)
+  return wrap
+}
+
+// 全失败：loading wrapper 就地转错误卡 + 点击重试整段
+export function failBelow(anchor: HTMLElement, msg: string, onRetranslate: () => void): void {
+  translatedAnchors.delete(anchor)
   const host = cardMap.get(anchor)
-  if (host) host.remove()
-  cardMap.delete(anchor)
+  if (host && isImmersiveHost(host)) {
+    refreshImmersive(host, 'error', msg)
+    setImmersiveRetry(host, onRetranslate)
+    return
+  }
+  const wrap = buildImmersive(anchor, 'error', msg)
+  setImmersiveRetry(wrap, onRetranslate)
+  placeAfter(anchor, wrap)
+  observe(anchor, wrap)
+}
+
+// 成功回退：分段数据拼回整段块级卡（clone 失败等极端路径，聊胜于无）
+export function showBelowText(anchor: HTMLElement, text: string): void {
+  translatedAnchors.add(anchor)
+  const host = cardMap.get(anchor)
+  if (host && isImmersiveHost(host)) {
+    refreshImmersive(host, 'success', text)
+    return
+  }
+  const wrap = buildImmersive(anchor, 'success', text)
+  placeAfter(anchor, wrap)
+  observe(anchor, wrap)
+}
+
+// --- 占位符提交（单请求还原产物直接落盘，替代逐节点多请求回填） ---
+// 原文只读：可克隆锚点浅克隆本体（tag/class/inline style 复刻，<a> 的 href 原样带过，
+// 原生可点）；单元格在格内建 div 容器（整格克隆会多出一列）。html 为 restoreSerialized
+// 产物（含原始标签对）；关闭删容器，原文不动。
+export function commitSerialized(anchor: HTMLElement, html: string): boolean {
+  if (!anchor.isConnected) return false
+  const cell = anchor.tagName === 'TD' || anchor.tagName === 'TH'
+  if (!cell && !isClonableAnchor(anchor)) return false
+  if (!html || !html.trim()) return false
+  let box: HTMLElement
+  try {
+    if (cell) {
+      box = document.createElement('div')
+    } else {
+      const c = anchor.cloneNode(false)
+      if (!(c instanceof HTMLElement)) return false
+      box = c
+      box.removeAttribute('id')
+    }
+  } catch { return false }
+  try {
+    box.innerHTML = html
+    // 防御：模型回声可能带回自有标记，摘除（正常还原产物不含这些）
+    try {
+      box.querySelectorAll(`[${CARD_ATTR}],[${IMM_ATTR}],[data-sai-unwrapped]`).forEach((el) => { try { el.remove() } catch {} })
+    } catch {}
+    box.setAttribute(CARD_ATTR, '1')
+    box.setAttribute(INPLACE_ATTR, '1')
+    box.setAttribute('translate', 'no')
+    // ::before 定位锚点：按原文定位属性复刻
+    try {
+      if (getComputedStyle(anchor).position === 'static') box.style.position = 'relative'
+    } catch { try { box.style.position = 'relative' } catch {} }
+    const close = document.createElement('button')
+    close.setAttribute(CARD_ATTR, '1')
+    close.setAttribute(`${IMM_ATTR}-close`, '1')
+    close.type = 'button'
+    close.textContent = '×'
+    close.title = '关闭译文'
+    close.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      removeCard(anchor)
+    })
+    // <a>/<button> 内不许嵌套可交互内容：关闭钮放 box 后面（兄弟选择器 hover 显现）
+    const interactive = !cell && (box.tagName === 'A' || box.tagName === 'BUTTON')
+    placeAfter(anchor, box)
+    try {
+      if (interactive) box.after(close)
+      else box.appendChild(close)
+    } catch {
+      try { box.appendChild(close) } catch {}
+    }
+    inplaceBelowMap.set(anchor, interactive ? [box, close] : [box])
+    cardMap.set(anchor, box)
+    observe(anchor, box)
+    try { updateCloseAllButton() } catch {}
+    translatedAnchors.add(anchor)
+    return true
+  } catch {
+    try { box.remove() } catch {}
+    return false
+  }
+}
+export function isCellAnchor(anchor: HTMLElement): boolean {
+  return anchor.tagName === 'TD' || anchor.tagName === 'TH'
+}
+
+
+export function removeCard(anchor: HTMLElement) {
+  translatedAnchors.delete(anchor)
+  // 克隆模式：删 clone + 关闭钮，原文从未被触碰
+  const below = inplaceBelowMap.get(anchor)
+  const host = cardMap.get(anchor)
+  withViewportAnchor(() => {
+    withIgnoredMutations([host?.parentElement, anchor], () => {
+      if (below) {
+        try { below.forEach((el) => { try { el.remove() } catch {} }) } catch {}
+        inplaceBelowMap.delete(anchor)
+      }
+      if (host) host.remove()
+      cardMap.delete(anchor)
+    })
+  })
   const obs = observerMap.get(anchor)
   if (obs) { obs.disconnect(); observerMap.delete(anchor) }
   // 同步清理图片 overlay 覆盖层
@@ -738,6 +983,7 @@ export function hasCard(anchor: HTMLElement): boolean {
 export function toggleInline(): void {
   const anyVisible = Array.from(cardMap.values()).some((h) => h.style.display !== 'none')
   // 卡片 host 的 display 被盔甲锁了 important，普通赋值无效，必须同级 important
+  // 克隆体同理：一并显隐（原文不受影响）
   for (const h of cardMap.values()) h.style.setProperty('display', anyVisible ? 'none' : 'block', 'important')
   // 图片 overlay 同步显隐
   for (const ov of imageOverlayMap.values()) ov.style.display = anyVisible ? 'none' : 'block'

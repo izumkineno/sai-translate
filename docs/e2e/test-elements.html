@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sai-translate e2e elements</title>
+<style>
+  body { font-family: Georgia, serif; margin: 0; color: #1f2937; background: #fff; }
+  header.sticky { position: sticky; top: 0; z-index: 100; background: #111827; color: #fff; padding: 10px 16px; }
+  .banner { position: fixed; bottom: 0; left: 0; right: 0; z-index: 9999; background: #fef08a; padding: 6px 12px; font-size: 12px; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1#f-title { font-size: 34px; color: #7c2d12; margin: 8px 0; }
+  h2 { font-size: 24px; color: #1e3a8a; }
+  h3 { font-size: 18px; color: #065f46; }
+  a { color: #2563eb; }
+  code { font-family: Consolas, monospace; background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; overflow: auto; }
+  pre code { background: none; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; }
+  th { background: #f9fafb; }
+  blockquote { border-left: 4px solid #9ca3af; margin: 12px 0; padding: 4px 12px; color: #4b5563; }
+  .dark { background: #1f2937; color: #f3f4f6; padding: 16px; border-radius: 8px; }
+  .dark a { color: #93c5fd; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+  footer { color: #6b7280; font-size: 12px; padding: 16px; text-align: center; }
+</style>
+</head>
+<body>
+<header class="sticky">sticky header (z-index 100, tests float coverage)</header>
+<main>
+  <h1 id="t-title">Hash Tables Are Fast Data Structures</h1>
+  <h2 id="t-h2">Design Notes on Open Addressing</h2>
+  <p id="t-plain">This crate is a high-performance hash map for everyday use.</p>
+  <p id="t-rich">This crate is a Rust port of Google's high-performance <a id="t-link" href="https://abseil.io/blog/20180927-swisstables">SwissTable</a> hash map, adapted to make it a <em>drop-in replacement</em> for Rust's standard <code>HashMap</code> and <code>HashSet</code> types.</p>
+  <h3>Lists</h3>
+  <ul id="t-ul">
+    <li>First item mentions <a href="https://example.com/a">concurrent readers</a> and speed</li>
+    <li>Second item is plain text about memory usage</li>
+  </ul>
+  <ol>
+    <li>Ordered step one with <strong>bold warning</strong> inside</li>
+    <li>Ordered step two</li>
+  </ol>
+  <h3>Table</h3>
+  <table id="t-table">
+    <thead><tr><th>Key type</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>String keys</td><td id="t-cell">Heap allocated keys support <a href="https://example.com/b">custom hashers</a> well</td></tr>
+      <tr><td>Integer keys</td><td>Folded directly into slots</td></tr>
+    </tbody>
+  </table>
+  <blockquote id="t-quote">Prefer fewer, larger allocations over many small ones when building caches.</blockquote>
+  <pre id="t-pre"><code>let mut m = HashMap::new();
+m.insert("key", 42);</code></pre>
+  <div class="dark" id="t-dark">
+    <p id="t-dark-p">Dark section paragraph with a <a href="https://example.com/c">themed link</a> for inheritance checks.</p>
+  </div>
+  <div class="cols">
+    <div class="card"><p id="t-card-a">Left card paragraph about latency percentiles.</p></div>
+    <div class="card"><p id="t-card-b">Right card paragraph about throughput limits.</p></div>
+  </div>
+  <h2>Image</h2>
+  <p><img id="t-img" width="64" height="64" alt="red square"
+    src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAbElEQVR4nO3PQQ0CIRgFYTiG/aUBW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7IFW7g7wCamy0xchtK3wAAAABJRU5ErkJggg==" /></p>
+  <footer>Footer note: all content above is synthetic English for e2e.</footer>
+</main>
+<div class="banner">fixed banner (z-index 9999)</div>
+</body>
+</html>

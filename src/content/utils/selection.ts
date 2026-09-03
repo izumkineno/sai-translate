@@ -30,7 +30,72 @@ export function isBlock(el: HTMLElement): boolean {
   return tag === 'P' || /^H[1-6]$/.test(tag) || tag === 'LI' || tag === 'BLOCKQUOTE' || tag === 'PRE' || tag === 'CODE' || tag === 'DIV' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'MAIN'
 }
 
+// --- 自有注入标记：译文/关闭钮/裸文本 marker，文本提取与收集时一律排除 ---
+// 同步语义对齐占位符还原：任何从 textContent 取原文的路径都必须跳过这些子树，
+// 否则二次翻译会把“堆分配键…”再算进原文（表格嵌套重灾区）。
+const OWN_ATTRS = ['data-sai', 'data-sai-immersive', 'data-sai-inplace', 'data-sai-unwrapped', 'data-sai-immersive-close', 'data-sai-overlay']
+export function isOwnInjectedElement(el: Element | null | undefined): boolean {
+  if (!el || !(el as Element).hasAttribute) return false
+  const e = el as HTMLElement
+  for (const a of OWN_ATTRS) { try { if (e.hasAttribute(a)) return true } catch {} }
+  try { if ((e as HTMLElement).dataset?.saiUnwrapped === '1') return true } catch {}
+  return false
+}
+function isInsideOwnMark(node: Node, stopAt: Node | null): boolean {
+  let el: Node | null = node.nodeType === Node.TEXT_NODE ? (node as Text).parentElement : (node as Element)
+  while (el && el !== stopAt) {
+    if (el.nodeType === Node.ELEMENT_NODE && isOwnInjectedElement(el as Element)) return true
+    el = el.parentNode
+  }
+  return false
+}
+const CLEAN_DEAD_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'])
+// 排除自有标记子树后的干净文本：保留 <a>/<em>/<code> 等特殊标记原文，只去我方注入
+export function getCleanTextContent(root: HTMLElement): string {
+  let out = ''
+  try {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    let n = walker.nextNode() as Text | null
+    while (n) {
+      const t = n.nodeValue ?? ''
+      if (t.trim()) {
+        const parent = n.parentElement
+        if (parent && !isInsideOwnMark(n, root)) {
+          let dead = false
+          let el: HTMLElement | null = parent
+          while (el && el !== root) {
+            if (CLEAN_DEAD_TAGS.has(el.tagName)) { dead = true; break }
+            el = el.parentElement
+          }
+          if (!dead && parent.tagName !== 'SCRIPT' && parent.tagName !== 'STYLE') out += ' ' + t.trim()
+        }
+      }
+      n = walker.nextNode() as Text | null
+    }
+  } catch {}
+  return out.trim()
+}
+// 表格结构标签：span/div 不能直插其子级（TR 兄弟不能是 span），译文另寻合法位置
+const TABLE_STRUCT_TAGS = new Set(['TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'COLGROUP', 'COL', 'CAPTION'])
+export function isTableStructural(el: Element | null | undefined): boolean {
+  return !!el && TABLE_STRUCT_TAGS.has((el as HTMLElement).tagName)
+}
+export function closestCell(el: Element | null): HTMLElement | null {
+  try { return (el?.closest?.('td,th') as HTMLElement | null) ?? null } catch { return null }
+}
+export function outermostTable(el: Element | null): HTMLElement | null {
+  let cur: HTMLElement | null = null
+  try {
+    let p: HTMLElement | null = el as HTMLElement | null
+    while (p) {
+      if (p.tagName === 'TABLE') cur = p
+      p = p.parentElement
+    }
+  } catch {}
+  return cur
+}
 function shouldExcludeNode(el: Element, excludeSel: string): boolean {
+  if (isOwnInjectedElement(el)) return true
   if (!excludeSel) return false
   try { return !!el.closest(excludeSel) } catch { return false }
 }
@@ -62,7 +127,7 @@ function scoreBlock(el: HTMLElement): number {
   else if (tag === 'TABLE' || tag === 'THEAD' || tag === 'TBODY' || tag === 'TFOOT' || tag === 'CAPTION') tagScore = 6
   else if (tag === 'DIV') tagScore = 5
   else tagScore = 8
-  const txtLen = (el.textContent || '').trim().length
+  const txtLen = getBlockText(el).length
   let lenPenalty = 0
   // 表格单元格短文本常见，不应重罚
   if (tag === 'TD' || tag === 'TH') {
@@ -87,7 +152,7 @@ export function findBestBlockForRange(range: Range, excludeSel = ''): HTMLElemen
   const candidates: HTMLElement[] = []
   while (el && el !== document.body) {
     if (isBlock(el) && !shouldExcludeNode(el, excludeSel)) {
-      const len = (el.textContent || '').trim().length
+      const len = getBlockText(el).length
       const isCell = el.tagName === 'TD' || el.tagName === 'TH'
       const minLen = isCell ? 2 : 10
       if (len >= minLen && len <= 2000) candidates.push(el)
@@ -114,7 +179,7 @@ export function findBestBlockAtPoint(x: number, y: number, excludeSel = ''): HTM
     if (isBlock(el) && !shouldExcludeNode(el, excludeSel)) {
       const rect = el.getBoundingClientRect()
       if (x >= rect.left - 2 && x <= rect.right + 2 && y >= rect.top - 2 && y <= rect.bottom + 2) {
-        const len = (el.textContent || '').trim().length
+        const len = getBlockText(el).length
         const isCell = el.tagName === 'TD' || el.tagName === 'TH'
         const minLen = isCell ? 2 : 10
         if (len >= minLen && len <= 3000) candidates.push(el)
@@ -228,7 +293,6 @@ export function rangeForOffsets(block: HTMLElement, start: number, end: number):
  return r
  } catch { return null }
 }
-
 export function getSentenceRangeAtPoint(x: number, y: number): { range: Range; block: HTMLElement; sentence: string; start: number; end: number } | null {
   let caretRange: Range | null = null
   try {
@@ -284,11 +348,12 @@ export function getBlocksInRange(range: Range, excludeSel = ''): HTMLElement[] {
  const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_ELEMENT, {
  acceptNode(node) {
  const el = node as HTMLElement
- if (!isBlock(el)) return NodeFilter.FILTER_SKIP
- const len = (el.textContent || '').trim().length
- const isCell = el.tagName === 'TD' || el.tagName === 'TH'
- const minLen = isCell ? 2 : 10
- if (len < minLen) return NodeFilter.FILTER_SKIP
+if (isOwnInjectedElement(el)) return NodeFilter.FILTER_REJECT
+if (!isBlock(el)) return NodeFilter.FILTER_SKIP
+const len = getBlockText(el).length
+const isCell = el.tagName === 'TD' || el.tagName === 'TH'
+const minLen = isCell ? 2 : 10
+if (len < minLen) return NodeFilter.FILTER_SKIP
  // intersects?
  try { if (!range.intersectsNode(el)) return NodeFilter.FILTER_SKIP } catch { return NodeFilter.FILTER_SKIP }
  return NodeFilter.FILTER_ACCEPT
@@ -337,7 +402,18 @@ export function getSelectedTextForBlock(block: HTMLElement, range: Range): strin
  const inter = document.createRange()
  inter.setStart(startContainer, startOffset)
  inter.setEnd(endContainer, endOffset)
- const txt = inter.toString().trim()
+ let txt = inter.toString().trim()
+ // 剥离我方注入译文：选区覆盖整格时会把“已翻译…”连带选中，特殊标记原文不受影响
+ try {
+   const hosts = block.querySelectorAll('[data-sai],[data-sai-immersive],[data-sai-inplace],[data-sai-unwrapped]')
+   if (hosts.length > 0) {
+     for (const h of Array.from(hosts)) {
+       const ht = ((h as HTMLElement).textContent || '').trim()
+       if (ht && txt.includes(ht)) txt = txt.replace(ht, '').trim()
+     }
+     if (!txt) return getBlockText(block)
+   }
+ } catch {}
  return txt
  } catch { return '' }
 }
@@ -347,7 +423,7 @@ export function getVisibleParagraphBlocks(excludeSel = ''): HTMLElement[] {
  const res: HTMLElement[] = []
  for (const el of all) {
  if (shouldExcludeNode(el, excludeSel)) continue
- const txt = (el.textContent || '').trim()
+const txt = getBlockText(el)
  if (txt.length < 15 || txt.length > 2000) continue
  const rect = el.getBoundingClientRect()
  if (rect.width < 50 || rect.height < 10) continue
@@ -363,7 +439,7 @@ export function getVisibleParagraphBlocks(excludeSel = ''): HTMLElement[] {
  const el = node as HTMLElement
  if (!isBlock(el)) return NodeFilter.FILTER_SKIP
  if (shouldExcludeNode(el, excludeSel)) return NodeFilter.FILTER_REJECT
- const len = (el.textContent || '').trim().length
+const len = getBlockText(el).length
  if (len < 20 || len > 2000) return NodeFilter.FILTER_SKIP
  return NodeFilter.FILTER_ACCEPT
  },
@@ -385,6 +461,11 @@ export function getBlockText(el: HTMLElement): string {
     const v = (el as HTMLElement & { dataset: DOMStringMap }).dataset.saiText
     if (typeof v === 'string' && v) return v
   }
+  // 用干净文本：跳过我方译文/关闭钮/裸文本 marker，特殊标记（<a>/<em> 等）原文保留
+  try {
+    const clean = getCleanTextContent(el)
+    if (clean) return clean
+  } catch {}
   return (el.textContent || '').trim()
 }
 
@@ -412,7 +493,7 @@ function collectUnwrappedSegments(container: HTMLElement, excludeSel: string, le
   for (const node of childNodes) {
     if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement
-      if (el.dataset?.saiUnwrapped === '1') {
+      if (isOwnInjectedElement(el) || el.dataset?.saiUnwrapped === '1') {
         flush()
         continue
       }
@@ -429,12 +510,14 @@ function collectUnwrappedSegments(container: HTMLElement, excludeSel: string, le
         continue
       }
       if (isInsideLeaf(node)) continue
-      const txt = (el.textContent || '').trim()
+      // 干净文本：排除已注入的译文子树，<a>/<em> 等特殊标记原文保留
+      const txt = getCleanTextContent(el)
       if (!txt) continue
       segmentNodes.push(el)
       segmentText += ' ' + txt
     } else if (node.nodeType === Node.TEXT_NODE) {
       if (isInsideLeaf(node)) continue
+      if (isInsideOwnMark(node, container)) continue
       const txt = (node.textContent || '').trim()
       if (!txt) continue
       segmentNodes.push(node)
@@ -454,15 +537,19 @@ function ensureMarkersForSegments(segments: Array<{ nodes: Node[]; text: string 
       next = next.nextSibling as HTMLElement | null
     }
     if (next && (next as HTMLElement).dataset?.saiUnwrapped === '1') {
+      // 特殊标记同步：复用旧 marker 时把最新干净文本写回，避免过期原文
       ;(next as HTMLElement).dataset.saiText = seg.text
       markers.push(next as HTMLElement)
     } else {
+      const parent = last.parentNode as HTMLElement | null
+      // 表格结构（TABLE/TR/section）下直插 <span> 非法，会被浏览器 foster-parent 搬走，
+      // 导致 marker 与段错位：直接跳过落盘，该段走单元格队列覆盖
+      if (parent && parent.nodeType === Node.ELEMENT_NODE && isTableStructural(parent as Element)) continue
       const marker = document.createElement('span')
       marker.dataset.saiUnwrapped = '1'
       marker.dataset.saiText = seg.text
       marker.style.display = 'none'
       marker.setAttribute('data-sai-unwrapped', '1')
-      const parent = last.parentNode
       if (parent) {
         try {
           parent.insertBefore(marker, last.nextSibling)
@@ -473,7 +560,6 @@ function ensureMarkersForSegments(segments: Array<{ nodes: Node[]; text: string 
   }
   return markers
 }
-
 /**
  * 检测 container 是否为包含多个段落的父容器。
  * 增强：对未被 p/span 包裹的裸文本（bare text）通过 marker 机制补齐，保证无包裹文本也能逐段队列翻译。
@@ -481,9 +567,8 @@ function ensureMarkersForSegments(segments: Array<{ nodes: Node[]; text: string 
 export function expandContainerToParagraphs(container: HTMLElement, excludeSel = 'pre,code,[contenteditable],script,style'): HTMLElement[] {
   if (!container || !(container instanceof HTMLElement)) return []
   const tag = container.tagName
-  if (tag === 'P' || tag === 'LI' || tag === 'BLOCKQUOTE' || tag === 'PRE' || /^H[1-6]$/.test(tag) || tag === 'TD' || tag === 'TH' || tag === 'CODE') {
-    return []
-  }
+  // 单元格永不展开：序列化载荷天然排除嵌套表子树，含嵌套表的外层格由调用方扇出内格队列
+  if (tag === 'P' || tag === 'LI' || tag === 'BLOCKQUOTE' || tag === 'PRE' || /^H[1-6]$/.test(tag) || tag === 'TD' || tag === 'TH' || tag === 'CODE') return []
   try {
     if (!container.querySelector) return []
   } catch { return [] }
@@ -539,7 +624,7 @@ export function expandContainerToParagraphs(container: HTMLElement, excludeSel =
   if (uniq.length < 2) return []
   if (uniq.length > 50) return uniq.slice(0, 50)
   // 覆盖率与平均长度检查（对 marker 取 dataset 文本）
-  const containerTextLen = (container.textContent || '').trim().length
+  const containerTextLen = getCleanTextContent(container).length || (container.textContent || '').trim().length
   const sumLen = uniq.reduce((sum, el) => sum + getBlockText(el).length, 0)
   if (containerTextLen > 0) {
     const coverage = sumLen / containerTextLen
@@ -1055,4 +1140,134 @@ export async function getImageDataURLForTranslation(img: HTMLImageElement): Prom
   // final check: if still over limits after retries, return null to signal too large
   if (bytes > 10 * 1024 * 1024 || b64Len > 14_000_000) return null
   return dataUrl
+}
+
+// --- 占位符序列化/还原（抄 KISS Translator：REPLACE + WARP 双集合，单请求） ---
+// 语义：整块一次翻译请求；复杂标签抽成 {{n}} 占位符原文返回；行内样式/逻辑标签包进
+// 安全小标签 <wN> 发译，还原时自底向上套回原始标签对（属性原样，href 不进模型）。
+// 替代上一代“逐 Text 节点多请求按序回填”（请求数×N、乱序错位、语序变化时位置必错）。
+const SER_DEAD_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'])
+// 原样保留、不进模型：代码类（沿用旧语义：代码不机翻）+ 媒体/换行
+//（含 td 内的 code/kbd/sub/sup：占位符保留，不再整格降级）
+const REPLACE_TAGS = new Set(['PRE', 'CODE', 'KBD', 'SAMP', 'VAR', 'TT', 'SUB', 'SUP', 'ABBR', 'DFN', 'OUTPUT', 'RP', 'RT', 'TIME', 'IMG', 'SVG', 'BR', 'WBR'])
+// 包裹翻译的行内标签：内容进模型，标签对存映射
+const WARP_TAGS = new Set(['A', 'B', 'STRONG', 'EM', 'I', 'U', 'S', 'SMALL', 'MARK', 'CITE', 'Q', 'SPAN', 'FONT', 'BDI', 'BDO', 'DEL', 'INS', 'BIG'])
+const SER_VOID_TAGS = new Set(['BR', 'WBR', 'IMG', 'SVG'])
+const SAFE_TAG_PREFIX = 'w'
+export type PlaceholderMap = Map<string, string | { openTag: string; closeTag: string }>
+export type SerializedBlock = { payload: string; map: PlaceholderMap; wrapCount: number }
+// 单请求上限：超了后台也会截断（TEXT_LIMIT=4000），占位符一断必回退，不如直接走纯文本
+export const SER_PAYLOAD_LIMIT = 3500
+function escapeSerHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+function buildOpenTag(el: Element): string {
+  let tag = `<${el.localName}`
+  for (const attr of Array.from(el.attributes)) {
+    tag += ` ${attr.name}="${attr.value.replace(/"/g, '&quot;')}"`
+  }
+  return tag + '>'
+}
+export function serializeAnchor(anchor: HTMLElement, opts?: { excludeNestedTables?: boolean }): SerializedBlock | null {
+  try {
+    if (anchor.closest?.('[contenteditable="true"],input,textarea')) return null
+    const excludeNested = !!opts?.excludeNestedTables
+    const map: PlaceholderMap = new Map()
+    let replaceCounter = 0
+    let wrapCounter = 0
+    const pushReplace = (html: string): string => {
+      replaceCounter++
+      const ph = `{{${replaceCounter}}}`
+      map.set(ph, html)
+      return ph
+    }
+    const traverse = (node: Node): string => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = node.nodeValue ?? ''
+        // 不逐节点 trim（行内元素间的必要空格在节点边缘），只丢纯空白
+        return /\S/.test(t) ? escapeSerHtml(t) : ''
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return ''
+      const el = node as HTMLElement
+      if (isOwnInjectedElement(el)) return ''
+      const tag = el.tagName
+      if (SER_DEAD_TAGS.has(tag)) return ''
+      // 单元格自有文本：嵌套表内的文本留给内格队列，外层不再重复计入
+      if (excludeNested && el !== anchor && (tag === 'TABLE' || tag === 'TD' || tag === 'TH' || tag === 'TR' || tag === 'TBODY' || tag === 'THEAD' || tag === 'TFOOT')) return ''
+      if (SER_VOID_TAGS.has(tag)) return pushReplace(el.outerHTML)
+      if (REPLACE_TAGS.has(tag)) {
+        if (!el.textContent?.trim()) return ''
+        return pushReplace(el.outerHTML)
+      }
+      let inner = ''
+      for (const child of Array.from(el.childNodes)) {
+        try { inner += traverse(child) } catch {}
+      }
+      if (!inner) return ''
+      if (WARP_TAGS.has(tag)) {
+        wrapCounter++
+        map.set(`TAG_${wrapCounter}`, { openTag: buildOpenTag(el), closeTag: `</${el.localName}>` })
+        return `<${SAFE_TAG_PREFIX}${wrapCounter}>${inner}</${SAFE_TAG_PREFIX}${wrapCounter}>`
+      }
+      return inner
+    }
+    let payload = ''
+    for (const child of Array.from(anchor.childNodes)) {
+      try { payload += traverse(child) } catch {}
+    }
+    payload = payload.trim()
+    if (!payload) return null
+    // 有效文本检查：去占位符/安全标签后仍是可译文本
+    const bare = payload.replace(/\{\{\d+\}\}/g, '').replace(/<\/?w\d+>/g, '').trim()
+    if (!isValidText(bare)) return null
+    if (payload.length > SER_PAYLOAD_LIMIT) return null
+    return { payload, map, wrapCount: wrapCounter }
+  } catch { return null }
+}
+// 还原：占位符缺失/安全标签对不上→null（调用方回退纯文本，避免弱模型幻觉污染版式）
+export function restoreSerialized(translated: string, map: PlaceholderMap, wrapCount: number): string | null {
+  try {
+    const text = (translated || '').trim()
+    if (!text) return null
+    for (const key of map.keys()) {
+      if (key.startsWith('{{') && !text.includes(key)) return null
+    }
+    let html = text
+    if (wrapCount > 0) {
+      const tpl = document.createElement('template')
+      tpl.innerHTML = text
+      const safes: Element[] = []
+      tpl.content.querySelectorAll('*').forEach((el) => {
+        // SAFE_TAG_PREFIX='w' 硬编码，避免模板字符串转义层数出错
+        if (/^w\d+$/i.test(el.tagName)) safes.push(el)
+      })
+      if (safes.length !== wrapCount) return null
+      // 自底向上倒序还原，嵌套标签的父子层级不被破坏
+      for (let i = safes.length - 1; i >= 0; i--) {
+        const el = safes[i]!
+        const m = el.tagName.match(/^w(\d+)$/i)
+        const pair = m ? map.get(`TAG_${m[1]}`) : undefined
+        if (!pair || typeof pair === 'string') return null
+        const holder = document.createElement('div')
+        holder.innerHTML = pair.openTag + el.innerHTML + pair.closeTag
+        if (holder.childElementCount !== 1) return null
+        el.replaceWith(holder.firstElementChild!)
+      }
+      html = tpl.innerHTML
+    }
+    for (const [key, val] of map) {
+      if (key.startsWith('{{') && typeof val === 'string') html = html.split(key).join(val)
+    }
+    if (/\{\{\d+\}\}/.test(html) || /<\/?w\d+>/i.test(html)) return null
+    // 卫生：模型输出不可信，去 script/style 与 on*（还原的原文标签页内本就存在，不新增风险面）
+    const clean = document.createElement('template')
+    clean.innerHTML = html
+    clean.content.querySelectorAll('script,style').forEach((el) => el.remove())
+    clean.content.querySelectorAll('*').forEach((el) => {
+      for (const attr of Array.from(el.attributes)) {
+        if (/^on/i.test(attr.name)) el.removeAttribute(attr.name)
+      }
+    })
+    return clean.innerHTML
+  } catch { return null }
 }

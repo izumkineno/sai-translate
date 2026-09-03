@@ -1,6 +1,6 @@
 import { getCurrentAnchor } from './hover'
 import * as HoverNS from './hover'
-import { injectLoading, removeAll, hasCard, removeCard, updateCard } from './inject'
+import { injectLoading, removeAll, hasCard, removeCard, hasTranslatedCard, updateCard, showBelowLoading, commitSerialized, failBelow, showBelowText, isClonableAnchor, isCellAnchor } from './inject'
 import {
   expandContainerToParagraphs,
   findBlockAnchor,
@@ -11,14 +11,16 @@ import {
   isValidText,
 } from './utils/selection'
 import * as SelectionNS from './utils/selection'
+import type { SerializedBlock } from './utils/selection'
 
-type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; imageUrl?: string; target?: string; requestId: string }
+type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; imageUrl?: string; target?: string; requestId: string; html?: boolean }
 type TranslateRes = { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: boolean; translated?: string; error?: string; model?: string; annotatedDataUrl?: string }
 type ImagePayloadMode = 'auto' | 'url' | 'base64'
 
 let shortcutKey = 'KeyQ'
 let targetLang = '中文'
 let imageMode: ImagePayloadMode = 'auto'
+let displayMode: 'card' | 'immersive' = 'card'
 
 function parseImageMode(v: unknown): ImagePayloadMode {
   return v === 'url' || v === 'base64' || v === 'auto' ? v : 'auto'
@@ -26,13 +28,15 @@ function parseImageMode(v: unknown): ImagePayloadMode {
 
 async function loadConfig() {
   try {
-    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang', 'sai_translate_image_mode'])
+    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang', 'sai_translate_image_mode', 'sai_translate_display_mode'])
     const sk = raw['sai_translate_shortcut_key']
     if (typeof sk === 'string' && sk) shortcutKey = sk
     const tl = raw['sai_translate_target_lang']
     if (typeof tl === 'string' && tl) targetLang = tl
     const im = raw['sai_translate_image_mode']
     imageMode = parseImageMode(im)
+    const dm = raw['sai_translate_display_mode']
+    displayMode = dm === 'immersive' ? 'immersive' : 'card'
   } catch {}
 }
 function genId(): string {
@@ -307,7 +311,70 @@ function collectImagesInRange(range: Range): HTMLImageElement[] {
   return uniq
 }
 
-async function doTranslate(text: string, anchor: HTMLElement | null, explicitTarget?: string) {
+// SAI_TRANSLATE 发收（doTranslate 与分段共用）
+function sendTranslateReq(req: TranslateReq): Promise<TranslateRes> {
+  return new Promise<TranslateRes>((resolve, reject) => {
+    try {
+      chrome.runtime.sendMessage(req, (res: unknown) => {
+        const err = chrome.runtime.lastError
+        if (err) { reject(new Error(err.message)); return }
+        if (!res || typeof res !== 'object') { reject(new Error('无响应')); return }
+        if (!('type' in res) || res.type !== 'SAI_TRANSLATE_RESULT') { reject(new Error('响应类型错误')); return }
+        resolve(res as unknown as TranslateRes)
+      })
+    } catch (e) { reject(e) }
+  })
+}
+
+// 占位符整块翻译：序列化一次请求，还原后落盘；还原失败回退纯文本块
+//（替代逐 Text 节点多请求：省请求、保语序、<a> 等特殊标记由映射同步）
+async function doTranslateSerialized(anchor: HTMLElement, ser: SerializedBlock, explicitTarget?: string, opts?: { force?: boolean }) {
+  if (!anchor.isConnected) return
+  // 已有译文重复触发 → 转关闭（卡片自带×/重译按钮不受影响：错误态无标记，重试直通）
+  if (!opts?.force && hasTranslatedCard(anchor)) { removeCard(anchor); return }
+  const target = explicitTarget || targetLang
+  showBelowLoading(anchor)
+  const req: TranslateReq = { type: 'SAI_TRANSLATE', kind: 'text', text: ser.payload, target, requestId: genId(), html: true }
+  let translated: string | null = null
+  try {
+    const res = await sendTranslateReq(req)
+    if (res.ok && typeof res.translated === 'string' && res.translated.trim()) translated = res.translated
+  } catch {}
+  if (!anchor.isConnected) return
+  if (!translated) {
+    failBelow(anchor, '翻译失败', () => { void doTranslateSerializedRetry(anchor, explicitTarget) })
+    return
+  }
+  const { restoreSerialized } = SelectionNS
+  const html = restoreSerialized(translated, ser.map, ser.wrapCount)
+  if (html && commitSerialized(anchor, html)) return
+  // 还原失败（弱模型删占位符/丢标签是常态）：纯文本单请求回退为块级卡，聊胜于无
+  try {
+    const plain = getBlockText(anchor).trim().slice(0, 4000)
+    if (plain && isValidText(plain)) {
+      const res2 = await sendTranslateReq({ type: 'SAI_TRANSLATE', kind: 'text', text: plain, target, requestId: genId() })
+      if (!anchor.isConnected) return
+      if (res2.ok && typeof res2.translated === 'string' && res2.translated.trim()) {
+        showBelowText(anchor, res2.translated)
+        return
+      }
+    }
+  } catch {}
+  if (!anchor.isConnected) return
+  failBelow(anchor, '翻译失败', () => { void doTranslateSerializedRetry(anchor, explicitTarget) })
+}
+// 重试统一走 doTranslate（重新序列化，原文可能已变化）
+async function doTranslateSerializedRetry(anchor: HTMLElement, explicitTarget?: string) {
+  try {
+    const cell = isCellAnchor(anchor)
+    const ser = SelectionNS.serializeAnchor(anchor, cell ? { excludeNestedTables: true } : undefined)
+    if (ser) { await doTranslateSerialized(anchor, ser, explicitTarget); return }
+  } catch {}
+  void doTranslate(getBlockText(anchor), anchor, explicitTarget)
+}
+
+
+async function doTranslate(text: string, anchor: HTMLElement | null, explicitTarget?: string, opts?: { force?: boolean }) {
   const normalized = text.trim()
   if (!isValidText(normalized)) {
     if (anchor) {
@@ -325,6 +392,58 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     }
   }
   if (!targetAnchor) targetAnchor = document.body as unknown as HTMLElement
+  // 已有译文重复触发 → 转关闭；成功卡片的重译按钮显式 force 直通，避免把“重译”变成“关闭”
+  if (!opts?.force && hasTranslatedCard(targetAnchor)) { removeCard(targetAnchor); return }
+  // 沉浸式 + 可克隆 anchor：占位符序列化后单请求，还原落盘（原文只读，行内结构由映射同步）
+  // BODY/超大载荷序列化失败时回退整段块级
+  if (displayMode === 'immersive' && targetAnchor && targetAnchor.tagName !== 'IMG' && targetAnchor.tagName !== 'BODY' && targetAnchor.tagName !== 'HTML' && isClonableAnchor(targetAnchor)) {
+    const ser = SelectionNS.serializeAnchor(targetAnchor)
+    if (ser) {
+      await doTranslateSerialized(targetAnchor, ser, explicitTarget)
+      return
+    }
+  }
+  // 沉浸式 + 单元格：同上，嵌套表子树不进外层载荷（含嵌套表的外层格扇出到内格队列）
+  if (displayMode === 'immersive' && targetAnchor && isCellAnchor(targetAnchor)) {
+    try {
+      if (targetAnchor.querySelector('table')) {
+        // 直接调用不经过 doTranslate，避免外层格重复扇出；深层嵌套逐层收敛
+        const outerSer = SelectionNS.serializeAnchor(targetAnchor, { excludeNestedTables: true })
+        if (outerSer) await doTranslateSerialized(targetAnchor, outerSer, explicitTarget)
+        const inners = Array.from(targetAnchor.querySelectorAll('td,th')) as HTMLElement[]
+        const valid = inners.filter((c) => { try { const t = getBlockText(c); return t && isValidText(t) } catch { return false } })
+        if (valid.length >= 1) await translateBlocksQueue(valid.slice(0, 50), (b) => getBlockText(b), explicitTarget)
+        return
+      }
+    } catch {}
+    const ser = SelectionNS.serializeAnchor(targetAnchor, { excludeNestedTables: true })
+    if (ser) {
+      await doTranslateSerialized(targetAnchor, ser, explicitTarget)
+      return
+    }
+  }
+  // 表格结构锚点（TABLE/TR/section）永远不单译：展开为内层单元格队列，span 落位才合法
+  if (targetAnchor && SelectionNS.isTableStructural(targetAnchor)) {
+    try {
+      const expanded = expandContainerToParagraphs(targetAnchor)
+      if (expanded.length >= 1) {
+        await translateBlocksQueue(expanded, (b) => getBlockText(b), explicitTarget)
+        return
+      }
+      const scope = (() => {
+        try {
+          if (targetAnchor.querySelectorAll('td,th').length > 0) return targetAnchor
+        } catch {}
+        return SelectionNS.outermostTable(targetAnchor) ?? targetAnchor
+      })()
+      const cells = Array.from(scope.querySelectorAll('td,th')) as HTMLElement[]
+      const valid = cells.filter((c) => getBlockText(c) && isValidText(getBlockText(c)))
+      if (valid.length >= 1) {
+        await translateBlocksQueue(valid.slice(0, 50), (b) => getBlockText(b).trim().slice(0, 4000), explicitTarget)
+        return
+      }
+    } catch {}
+  }
   try {
     await injectLoading(targetAnchor)
   } catch (e) {
@@ -339,24 +458,12 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     target: explicitTarget || targetLang,
     requestId: genId(),
   }
-  const send = () =>
-    new Promise<TranslateRes>((resolve, reject) => {
-      try {
-        chrome.runtime.sendMessage(req, (res: unknown) => {
-          const err = chrome.runtime.lastError
-          if (err) { reject(new Error(err.message)); return }
-          if (!res || typeof res !== 'object') { reject(new Error('无响应')); return }
-          const r = res as Record<string, unknown>
-          if (r['type'] !== 'SAI_TRANSLATE_RESULT') { reject(new Error('响应类型错误')); return }
-          resolve(r as unknown as TranslateRes)
-        })
-      } catch (e) { reject(e) }
-    })
+  const send = () => sendTranslateReq(req)
   try {
     const res = await send()
     if (res.ok) {
       const translated = typeof res.translated === 'string' ? res.translated : ''
-      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslate(text, targetAnchor, explicitTarget) })
+      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslate(text, targetAnchor, explicitTarget, { force: true }) })
     } else {
       const err = typeof res.error === 'string' ? res.error : '翻译失败'
       updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslate(text, targetAnchor, explicitTarget) })
@@ -758,6 +865,10 @@ export function initShortcut() {
     if ('sai_translate_image_mode' in changes) {
       const v = changes['sai_translate_image_mode']?.newValue
       imageMode = parseImageMode(v)
+    }
+    if ('sai_translate_display_mode' in changes) {
+      const v = changes['sai_translate_display_mode']?.newValue
+      displayMode = v === 'immersive' ? 'immersive' : 'card'
     }
   })
   window.addEventListener('keydown', (e) => {

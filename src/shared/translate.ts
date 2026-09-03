@@ -39,15 +39,17 @@ export type ChatBody = {
   sys: string
 }
 
-export function buildChatBody(model: string, target: string, text: string): ChatBody {
+export function buildChatBody(model: string, target: string, text: string, opts?: { preserveMarkup?: boolean }): ChatBody {
   const isHy = isHyModel(model)
   const hyTarget = isHy ? toHyTarget(target, text) : ''
   const modelForRequest = isHy && hyTarget && !model.includes(':') ? `${model}:${hyTarget}` : model
+  // 占位符模式：文本内含 {{n}} 与 <wN> 标签，指示模型只译文字、原样保留标记
+  const keep = opts?.preserveMarkup ? ' Keep {{n}} placeholders and <wN>...</wN> tags exactly as-is in the output; only translate the text between them.' : ''
   const sys = isHy
-    ? 'You are a professional translator. Only output the translation, no explanation.'
+    ? 'You are a professional translator. Only output the translation, no explanation.' + keep
     : target === 'Auto'
-      ? 'You are a professional translator. Detect the source language and translate to the other language: if the text is Chinese, translate to English; otherwise translate to Chinese. Only output the translation, no explanation.'
-      : `You are a professional translator. Translate the following text to ${target}. Only output the translation, no explanation.`
+      ? 'You are a professional translator. Detect the source language and translate to the other language: if the text is Chinese, translate to English; otherwise translate to Chinese. Only output the translation, no explanation.' + keep
+      : `You are a professional translator. Translate the following text to ${target}. Only output the translation, no explanation.` + keep
 
   const body: Record<string, unknown> = {
     model: modelForRequest,
@@ -102,6 +104,8 @@ export type TranslateReq = {
   target?: string
   requestId: string
   kind?: 'text' | 'image'
+  // 占位符序列化载荷：后台提示词追加保留标记指令，还原失败由内容侧回退纯文本
+  html?: boolean
   imageDataUrl?: string
   imageUrl?: string
 }
@@ -206,9 +210,9 @@ function getOpenAIClient(baseUrl: string, apiKey: string) {
 
 // helper to call LLM directly (for background, reuses same body building)
 // hy-mt2 保持手写 fetch 以保留 target_language/language/target_lang 字段；非 hy 走 OpenAI SDK
-export async function callLLM(baseUrl: string, apiKey: string, model: string, target: string, text: string, signal?: AbortSignal): Promise<string> {
+export async function callLLM(baseUrl: string, apiKey: string, model: string, target: string, text: string, signal?: AbortSignal, opts?: { preserveMarkup?: boolean }): Promise<string> {
   const isHy = isHyModel(model)
-  const { body, hyTarget, modelForRequest } = buildChatBody(model, target, text)
+  const { body, hyTarget, modelForRequest } = buildChatBody(model, target, text, opts)
   if (isHy) {
     const base = normalizeBaseUrl(baseUrl)
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
