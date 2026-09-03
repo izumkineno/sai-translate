@@ -202,15 +202,11 @@ export default function Settings() {
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '16px' }}>
       <div class="n-layout-content__header">
         <div class="n-layout-content__title">模型配置</div>
-        <Show when={models().length > 0}>
-          <span style={{ 'font-size': '12px', color: 'var(--n-text-3)' }}>{models().length} 个源</span>
-        </Show>
       </div>
 
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
           <span class="n-card-header__title">已配置源</span>
-          <span class="n-card-header__extra">每源多模型 · 点标签切换当前</span>
         </div>
         <div class="n-card__content">
           <Show
@@ -227,10 +223,7 @@ export default function Settings() {
                     <path d="M9 13v2" />
                   </svg>
                 </div>
-                <div class="n-empty__desc">暂无源</div>
-                <div class="n-empty__extra" style={{ 'font-size': '12px', color: 'var(--n-text-3)' }}>
-                  下方添加 OpenAI 兼容源，每个源可包含多个模型
-                </div>
+                <div class="n-empty__desc">暂无源，在下方添加</div>
               </div>
             }
           >
@@ -319,7 +312,6 @@ export default function Settings() {
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
           <span class="n-card-header__title">添加源</span>
-          <span class="n-card-header__extra">OpenAI 兼容 · 一源多模型</span>
         </div>
         <div class="n-card__content">
           <div class="n-form">
@@ -426,9 +418,9 @@ export default function Settings() {
  <Show when={availableModels().length > 0}>
  <div style={{ 'margin-top': '10px', border: '1px solid var(--n-divider)', 'border-radius': '8px', padding: '8px', background: '#fafafb' }}>
  <div style={{ display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', 'margin-bottom': '6px' }}>
- <span style={{ 'font-size': '11px', color: 'var(--n-text-1)', 'font-weight': '600' }}>
- 模型 tag · 点选中即加入（{selectedModels().length}/{availableModels().length} 已选）
- </span>
+<span style={{ 'font-size': '11px', color: 'var(--n-text-1)', 'font-weight': '600' }}>
+点选加入（{selectedModels().length}/{availableModels().length}）
+</span>
  <Show when={selectedModels().length > 0}>
  <button type="button" class="n-button" style={{ height: '20px', padding: '0 6px', 'font-size': '11px' }} onClick={() => setSelectedModels([])}>
  清空选择
@@ -452,16 +444,11 @@ export default function Settings() {
  </div>
  </div>
  </Show>
- <Show when={availableModels().length === 0}>
- <div style={{ 'font-size': '11px', color: 'var(--n-text-3)', 'margin-top': '8px' }}>
- 暂无模型 tag：点“获取模型”拉取，或在上方输入自定义后点“添加”生成 tag 并自动选中
- </div>
- </Show>
- <Show when={selectedModels().length > 0}>
- <div style={{ 'font-size': '11px', color: 'var(--n-text-3)', 'margin-top': '6px' }}>
- 已选 {selectedModels().length} 个：{selectedModels().join('、')}
- </div>
- </Show>
+<Show when={availableModels().length === 0}>
+<div style={{ 'font-size': '11px', color: 'var(--n-text-3)', 'margin-top': '8px' }}>
+点“获取模型”拉取，或输入自定义模型后点“添加”
+</div>
+</Show>
  </div>
  </div>
 

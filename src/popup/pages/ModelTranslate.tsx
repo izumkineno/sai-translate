@@ -98,21 +98,14 @@ export default function ModelTranslate() {
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '16px' }}>
       <div class="n-layout-content__header">
         <div class="n-layout-content__title">翻译</div>
-        <Show when={models().length > 0}>
-          <span style={{ 'font-size': '12px', color: 'var(--n-text-3)' }}>{models().length} 个源</span>
-        </Show>
       </div>
 
       <div class="n-card n-card--bordered">
-        <div class="n-card-header">
-          <span class="n-card-header__title">翻译</span>
-          <span class="n-card-header__extra">直调 {selectedSource()?.activeModel ?? '—'}</span>
-        </div>
- <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
- <Show
- when={models().length > 0}
- fallback={<div class="n-alert n-alert--error">暂无可用模型，请先在模型配置页添加 OpenAI 兼容模型</div>}
- >
+        <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
+          <Show
+            when={models().length > 0}
+            fallback={<div class="n-alert n-alert--error">暂无可用模型，请先在模型配置页添加 OpenAI 兼容模型</div>}
+          >
  <div style={{ display: 'flex', gap: '8px', 'flex-wrap': 'wrap' }}>
  <div style={{ flex: '1 1 132px', display: 'flex', 'flex-direction': 'column', gap: '4px' }}>
  <span style={{ 'font-size': '10px', color: 'var(--n-text-3)', 'letter-spacing': '0.4px' }}>提供商</span>
@@ -126,7 +119,7 @@ export default function ModelTranslate() {
  </div>
  <Show when={selectedSource()}>
  <div style={{ flex: '1 1 132px', display: 'flex', 'flex-direction': 'column', gap: '4px' }}>
- <span style={{ 'font-size': '10px', color: 'var(--n-text-3)', 'letter-spacing': '0.4px' }}>模型 · {selectedSource()!.models.length}</span>
+<span style={{ 'font-size': '10px', color: 'var(--n-text-3)', 'letter-spacing': '0.4px' }}>模型</span>
  <select
  class="n-select"
  value={selectedSource()!.activeModel}
@@ -140,7 +133,7 @@ export default function ModelTranslate() {
  </div>
  </Show>
  <div style={{ flex: '0 0 110px', display: 'flex', 'flex-direction': 'column', gap: '4px' }}>
- <span style={{ 'font-size': '10px', color: 'var(--n-text-3)', 'letter-spacing': '0.4px' }}>目标语</span>
+<span style={{ 'font-size': '10px', color: 'var(--n-text-3)', 'letter-spacing': '0.4px' }}>目标语言</span>
  <select class="n-select" value={target()} onChange={(e) => setTarget(e.currentTarget.value)}>
  <option value="中文">→ 中文</option>
  <option value="English">→ English</option>

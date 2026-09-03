@@ -92,7 +92,7 @@ export default function App() {
         </nav>
         <div style={{ padding: '12px', 'border-top': '1px solid var(--n-border-color, #eee)', 'margin-top': 'auto' }}>
           <button class="n-button n-button--ghost" style={{ width: '100%', 'font-size': '12px' }} type="button" onClick={onCloseAllGlobal} disabled={closing()}>
-            {closing() ? '关闭中…' : '🗑 关闭全部译文'}
+            {closing() ? '关闭中…' : '关闭全部译文'}
           </button>
         </div>
       </aside>

@@ -71,23 +71,19 @@ export default function ShortcutHoverSettings() {
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '16px' }}>
       <div class="n-layout-content__header">
         <div class="n-layout-content__title">悬浮翻译</div>
-        <span style={{ 'font-size': '12px', color: 'var(--n-text-3)' }}>沉浸式方案</span>
       </div>
 
       {/* 快捷键 */}
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
           <span class="n-card-header__title">触发快捷键</span>
-          <span class="n-card-header__extra">双轨</span>
         </div>
         <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
           <div class="n-alert n-alert--info" style={{ 'font-size': '12px' }}>
-            主快捷键 <b>Alt+Shift+T</b>（系统级）可在 <button class="n-button n-button--text" style="padding:0 4px" onClick={openShortcuts} type="button">chrome://extensions/shortcuts</button> 修改<br />
-            选词键 <b>Alt+Shift+S</b>（系统级，仅翻译选区）与页内选词键可在划词页配置<br />
-            页内快捷键 <b>Alt+{shortcutKey().replace('Key','')}</b> 可在此配置
+            系统级 <b>Alt+Shift+T</b> 翻译 / <b>Alt+Shift+S</b> 选词，可在 <button class="n-button n-button--text" style="padding:0 4px" onClick={openShortcuts} type="button">chrome://extensions/shortcuts</button> 修改
           </div>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
-            <span style={{ width: '120px' }}>页内键 (Alt+?)</span>
+            <span style={{ width: '120px' }}>页内键</span>
             <select
               value={shortcutKey()}
               onChange={(e) => {
@@ -98,11 +94,11 @@ export default function ShortcutHoverSettings() {
               class="n-input"
               style={{ flex: '1', padding: '6px 8px', 'border-radius': '6px', border: '1px solid #e5e7eb' }}
             >
-              <option value="KeyQ">Q</option>
-              <option value="KeyT">T</option>
-              <option value="KeyY">Y</option>
-              <option value="KeyS">S</option>
-              <option value="KeyD">D</option>
+              <option value="KeyQ">Alt+Q</option>
+              <option value="KeyT">Alt+T</option>
+              <option value="KeyY">Alt+Y</option>
+              <option value="KeyS">Alt+S</option>
+              <option value="KeyD">Alt+D</option>
             </select>
           </label>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
@@ -136,7 +132,7 @@ export default function ShortcutHoverSettings() {
                 void save({ inlineEnabled: v })
               }}
             />
-            启用行下插入（关闭则快捷键不 inject）
+            在原文行下方插入译文
           </label>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
             <span style={{ width: '120px' }}>图片翻译模式</span>
@@ -150,14 +146,11 @@ export default function ShortcutHoverSettings() {
               class="n-input"
               style={{ flex: '1', padding: '6px 8px', 'border-radius': '6px', border: '1px solid #e5e7eb' }}
             >
-              <option value="auto">智能（小图 base64 / 大图·跨域 URL）</option>
-              <option value="url">始终 URL（服务端拉取，省 base64）</option>
-              <option value="base64">始终 Base64（本地转码，失败回退 URL）</option>
+              <option value="auto">智能选择</option>
+              <option value="url">始终用图片地址</option>
+              <option value="base64">始终用 Base64</option>
             </select>
           </label>
-          <div style={{ 'font-size': '11px', color: '#6b7280', 'line-height': '1.4' }}>
-            远端地址走后端 <code>reqwest</code> 拉取（跳过 CORS），超时 40s；base64 过大（&gt;10MiB）自动回退 URL，对应服务端 §3.1 混用
-          </div>
         </div>
       </div>
 
@@ -165,7 +158,6 @@ export default function ShortcutHoverSettings() {
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
           <span class="n-card-header__title">译文展示</span>
-          <span class="n-card-header__extra">窗口 / 沉浸式切换</span>
         </div>
         <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
@@ -185,7 +177,7 @@ export default function ShortcutHoverSettings() {
             </select>
           </label>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
-            <span style={{ width: '120px' }}>头标颜色</span>
+            <span style={{ width: '120px' }}>沉浸式色标</span>
             <input
               type="color"
               value={markerColor()}
@@ -196,7 +188,7 @@ export default function ShortcutHoverSettings() {
               }}
               style={{ width: '60px', height: '32px', padding: '2px', border: '1px solid #e5e7eb', 'border-radius': '6px' }}
             />
-            <span style={{ 'font-size': '12px', color: '#6b7280' }}>{markerColor()}（沉浸式左侧色标，hover 显示 × 关闭）</span>
+            <span style={{ 'font-size': '12px', color: '#6b7280' }}>{markerColor()}</span>
           </label>
         </div>
       </div>
@@ -204,13 +196,12 @@ export default function ShortcutHoverSettings() {
       {/* Hover 预选 */}
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
-          <span class="n-card-header__title">悬浮预选高亮</span>
-          <span class="n-card-header__extra">不调 LLM</span>
+          <span class="n-card-header__title">悬浮预选</span>
         </div>
         <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '10px' }}>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
             <input type="checkbox" checked={hoverEnabled()} onChange={(e) => { const v = e.currentTarget.checked; setHoverEnabled(v); void save({ hoverEnabled: v }) }} />
-            总开关（关闭则无高亮/图标/虚线）
+            启用悬浮预选
           </label>
           <div style={{ display: 'flex', gap: '12px', 'flex-wrap': 'wrap' }}>
             <label style={{ display: 'flex', 'align-items': 'center', gap: '6px', 'font-size': '12px' }}>
@@ -254,7 +245,7 @@ export default function ShortcutHoverSettings() {
           </div>
 
           <label style={{ display: 'flex', 'flex-direction': 'column', gap: '4px', 'font-size': '11px' }}>
-            排除选择器（逗号分隔，命中不高亮）
+            不预选这些元素（选择器，逗号分隔）
             <input
               class="n-input"
               value={exclude()}
@@ -268,10 +259,6 @@ export default function ShortcutHoverSettings() {
           {msg() && <div style={{ 'font-size': '12px', color: '#059669' }}>{msg()}</div>}
           {saving() && <div style={{ 'font-size': '12px', color: '#6b7280' }}>保存中…</div>}
         </div>
-      </div>
-
-      <div style={{ 'font-size': '11px', color: '#9ca3af', 'text-align': 'center' }}>
-        悬浮仅预选不发请求，按 Alt+Shift+T / Alt+Q 翻译悬浮块或选中文本
       </div>
     </div>
   )

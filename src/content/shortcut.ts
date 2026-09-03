@@ -410,8 +410,8 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     }
   }
   if (!targetAnchor) targetAnchor = document.body as unknown as HTMLElement
-  // 已有译文重复触发 → 转关闭；成功卡片的重译按钮显式 force 直通，避免把“重译”变成“关闭”
-  if (!opts?.force && hasTranslatedCard(targetAnchor)) { removeCard(targetAnchor); return }
+  // 选中翻译（card 窗口）仅重复翻译不做 toggle；hover/图标路径保留重复触发关闭
+  if (!cardOnly && !opts?.force && hasTranslatedCard(targetAnchor)) { removeCard(targetAnchor); return }
   if (!cardOnly && displayMode === 'immersive' && targetAnchor && targetAnchor.tagName !== 'IMG' && targetAnchor.tagName !== 'BODY' && targetAnchor.tagName !== 'HTML' && isClonableAnchor(targetAnchor)) {
     const ser = SelectionNS.serializeAnchor(targetAnchor)
     if (ser) {
