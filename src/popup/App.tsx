@@ -28,6 +28,11 @@ export default function App() {
     <div class="n-layout has-sider">
       {/* Sider — Naive n-layout-sider + n-menu: 独立 tabs */}
       <aside class="n-layout-sider" style={{ display: 'flex', 'flex-direction': 'column', 'justify-content': 'space-between' }}>
+        <div style={{ display: 'flex', 'align-items': 'center', gap: '8px', padding: '12px 12px 10px', 'border-bottom': '1px solid var(--n-border-color, #eee)' }}>
+          <img src={chrome.runtime.getURL('logo.png')} width="24" height="24" style={{ 'border-radius': '6px' }} alt="" />
+          <span style={{ 'font-size': '13px', 'font-weight': '700' }}>sai-translate</span>
+          <span style={{ 'font-size': '10px', color: '#9ca3af' }}>v{chrome.runtime.getManifest().version}</span>
+        </div>
         <nav class="n-menu" aria-label="导航">
           <button
             class={`n-menu-item ${active() === 'translate' ? 'n-menu-item--active' : ''}`}
