@@ -12,7 +12,7 @@ import {
 } from './utils/selection'
 import * as SelectionNS from './utils/selection'
 
-type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; target?: string; requestId: string }
+type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; imageUrl?: string; target?: string; requestId: string }
 type TranslateRes = { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: boolean; translated?: string; error?: string; model?: string; annotatedDataUrl?: string }
 
 let shortcutKey = 'KeyQ'
@@ -40,8 +40,49 @@ function resolveImageHelpers() {
     findBestImageForRange: ns['findBestImageForRange'] as ((range: Range, exclude?: string) => HTMLImageElement | null) | undefined,
     findBestImageAtPoint: ns['findBestImageAtPoint'] as ((x: number, y: number, exclude?: string) => HTMLImageElement | null) | undefined,
     getImageDataURLForTranslation: ns['getImageDataURLForTranslation'] as ((img: HTMLImageElement) => Promise<string | null>) | undefined,
+    getImagePayloadForTranslation: ns['getImagePayloadForTranslation'] as ((img: HTMLImageElement) => Promise<{ url: string; mode: 'data' | 'url' } | null>) | undefined,
+    isCrossOriginUrl: ns['isCrossOriginUrl'] as ((src: string) => boolean) | undefined,
+    isLargeImage: ns['isLargeImage'] as ((img: HTMLImageElement) => boolean) | undefined,
   }
 }
+
+async function getPayloadForImage(img: HTMLImageElement): Promise<string | null> {
+  try {
+    const h = resolveImageHelpers()
+    if (h.getImagePayloadForTranslation) {
+      const p = await h.getImagePayloadForTranslation(img)
+      if (p && typeof p.url === 'string' && p.url) return p.url
+    }
+  } catch {}
+  // fallback — mirror selection.ts hybrid logic without relying on new export
+  try {
+    const rawSrc = (img.currentSrc || img.src || '').trim()
+    if (!rawSrc) return null
+    const low = rawSrc.toLowerCase()
+    if (low.startsWith('data:image/')) return rawSrc
+    if (low.startsWith('blob:')) {
+      const h2 = resolveImageHelpers()
+      const getter = h2.getImageDataURLForTranslation || getImageDataURLFallback
+      const d = await getter(img)
+      if (d) return d
+      return null
+    }
+    const isCross = (() => {
+      try { return new URL(rawSrc, location.href).origin !== location.origin } catch { return false }
+    })()
+    const isLarge = img.naturalWidth * img.naturalHeight > 1_000_000 || Math.max(img.naturalWidth, img.naturalHeight) > 1600
+    if (isCross || isLarge) {
+      if (/^https?:\/\//i.test(rawSrc)) return rawSrc
+    }
+    const h3 = resolveImageHelpers()
+    const getter2 = h3.getImageDataURLForTranslation || getImageDataURLFallback
+    const data = await getter2(img)
+    if (data) return data
+    if (/^https?:\/\//i.test(rawSrc)) return rawSrc
+  } catch {}
+  return null
+}
+
 
 function getCurrentImageAnchor(): HTMLImageElement | null {
   const hoverAny = HoverNS as unknown as Record<string, unknown>
@@ -254,21 +295,23 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
   }
 }
 
-async function doTranslateImage(dataUrl: string, anchor: HTMLElement, explicitTarget?: string) {
+async function doTranslateImage(imageUrl: string, anchor: HTMLElement, explicitTarget?: string) {
   let targetAnchor: HTMLElement = anchor
   if (!targetAnchor) targetAnchor = document.body as unknown as HTMLElement
   try {
     await injectLoading(targetAnchor)
   } catch (e) {
     const msg = e instanceof Error ? e.message : '注入失败'
-    updateCard(targetAnchor, 'error', msg, '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
+    updateCard(targetAnchor, 'error', msg, '错误', () => { void doTranslateImage(imageUrl, targetAnchor, explicitTarget) })
     return
   }
+  const isData = imageUrl.trim().toLowerCase().startsWith('data:')
   const req: TranslateReq = {
     type: 'SAI_TRANSLATE',
     kind: 'image',
-    text: dataUrl,
-    imageDataUrl: dataUrl,
+    text: imageUrl,
+    imageUrl: imageUrl,
+    ...(isData ? { imageDataUrl: imageUrl } : {}),
     target: explicitTarget || targetLang,
     requestId: genId(),
   }
@@ -290,14 +333,14 @@ async function doTranslateImage(dataUrl: string, anchor: HTMLElement, explicitTa
     if (res.ok) {
       const translated = typeof res.translated === 'string' ? res.translated : ''
       const annotated = typeof res.annotatedDataUrl === 'string' ? res.annotatedDataUrl : undefined
-      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) }, annotated)
+      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslateImage(imageUrl, targetAnchor, explicitTarget) }, annotated)
     } else {
       const err = typeof res.error === 'string' ? res.error : '翻译失败'
-      updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
+      updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslateImage(imageUrl, targetAnchor, explicitTarget) })
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : '请求失败'
-    updateCard(targetAnchor, 'error', msg.slice(0, 300), '错误', () => { void doTranslateImage(dataUrl, targetAnchor, explicitTarget) })
+    updateCard(targetAnchor, 'error', msg.slice(0, 300), '错误', () => { void doTranslateImage(imageUrl, targetAnchor, explicitTarget) })
   }
 }
 
@@ -389,15 +432,8 @@ async function translateImagesQueue(imgs: HTMLImageElement[], explicitTarget?: s
       if (cur >= uniq.length) break
       const img = uniq[cur]!
       try {
-        const helpers = resolveImageHelpers()
-        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-        let dataUrl: string | null = null
-        try {
-          dataUrl = await getter(img)
-        } catch {
-          dataUrl = null
-        }
-        if (!dataUrl) {
+        const payload = await getPayloadForImage(img)
+        if (!payload) {
           const msg = getImageErrorMessage(img, true)
           try {
             await injectLoading(img)
@@ -408,19 +444,18 @@ async function translateImagesQueue(imgs: HTMLImageElement[], explicitTarget?: s
           }
           updateCard(img, 'error', msg, '错误', () => {
             void (async () => {
-              let retryData: string | null = null
-              try { retryData = await getter(img) } catch { retryData = null }
-              if (!retryData) {
+              const retryPayload = await getPayloadForImage(img)
+              if (!retryPayload) {
                 const rmsg = getImageErrorMessage(img, true)
                 updateCard(img, 'error', rmsg, '错误', () => { void translateImagesQueue([img], explicitTarget) })
               } else {
-                void doTranslateImage(retryData, img, explicitTarget)
+                void doTranslateImage(retryPayload, img, explicitTarget)
               }
             })()
           })
           continue
         }
-        await doTranslateImage(dataUrl, img, explicitTarget)
+        await doTranslateImage(payload, img, explicitTarget)
       } catch {
         // isolated, continue to next
       }
@@ -444,23 +479,19 @@ function handleTranslateSelection() {
         // single image in range
         const singleImg = imgsInRange[0]!
         void (async () => {
-          const helpers = resolveImageHelpers()
-          const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-          let dataUrl: string | null = null
-          try { dataUrl = await getter(singleImg) } catch { dataUrl = null }
-          if (!dataUrl) {
+          const payload = await getPayloadForImage(singleImg)
+          if (!payload) {
             const msg = getImageErrorMessage(singleImg, true)
             try {
               await injectLoading(singleImg)
               updateCard(singleImg, 'error', msg, '错误', () => {
                 void (async () => {
-                  let retryData: string | null = null
-                  try { retryData = await getter(singleImg) } catch { retryData = null }
-                  if (!retryData) {
+                  const retryPayload = await getPayloadForImage(singleImg)
+                  if (!retryPayload) {
                     const rmsg = getImageErrorMessage(singleImg, true)
-                    updateCard(singleImg, 'error', rmsg, '错误', () => { void (async () => { let d=null; try{d=await getter(singleImg)}catch{}; if(!d) updateCard(singleImg,'error',getImageErrorMessage(singleImg,true),'错误',()=>{}); else void doTranslateImage(d,singleImg)})() })
+                    updateCard(singleImg, 'error', rmsg, '错误', () => { void (async () => { const p = await getPayloadForImage(singleImg); if(!p) updateCard(singleImg,'error',getImageErrorMessage(singleImg,true),'错误',()=>{}); else void doTranslateImage(p,singleImg)})() })
                   } else {
-                    void doTranslateImage(retryData, singleImg)
+                    void doTranslateImage(retryPayload, singleImg)
                   }
                 })()
               })
@@ -470,7 +501,7 @@ function handleTranslateSelection() {
             }
             return
           }
-          await doTranslateImage(dataUrl, singleImg)
+          await doTranslateImage(payload, singleImg)
         })()
         return
       }
@@ -481,25 +512,22 @@ function handleTranslateSelection() {
           const best = helpers.findBestImageForRange(range, getExcludeSel())
           if (best) {
             void (async () => {
-              const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-              let dataUrl: string | null = null
-              try { dataUrl = await getter(best) } catch { dataUrl = null }
-              if (!dataUrl) {
+              const payload = await getPayloadForImage(best)
+              if (!payload) {
                 const msg = getImageErrorMessage(best, true)
                 try {
                   await injectLoading(best)
                   updateCard(best, 'error', msg, '错误', () => {
                     void (async () => {
-                      let retryData: string | null = null
-                      try { retryData = await getter(best) } catch { retryData = null }
-                      if (!retryData) updateCard(best, 'error', getImageErrorMessage(best, true), '错误', () => {})
-                      else void doTranslateImage(retryData, best)
+                      const retryPayload = await getPayloadForImage(best)
+                      if (!retryPayload) updateCard(best, 'error', getImageErrorMessage(best, true), '错误', () => {})
+                      else void doTranslateImage(retryPayload, best)
                     })()
                   })
                 } catch {}
                 return
               }
-              await doTranslateImage(dataUrl, best)
+              await doTranslateImage(payload, best)
             })()
             return
           }
@@ -513,20 +541,16 @@ function handleTranslateSelection() {
     const hoverImg = getCurrentImageAnchor()
     if (hoverImg) {
       void (async () => {
-        const helpers = resolveImageHelpers()
-        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-        let dataUrl: string | null = null
-        try { dataUrl = await getter(hoverImg) } catch { dataUrl = null }
-        if (!dataUrl) {
+        const payload = await getPayloadForImage(hoverImg)
+        if (!payload) {
           const msg = getImageErrorMessage(hoverImg, true)
           try {
             await injectLoading(hoverImg)
             updateCard(hoverImg, 'error', msg, '错误', () => {
               void (async () => {
-                let retryData: string | null = null
-                try { retryData = await getter(hoverImg) } catch { retryData = null }
-                if (!retryData) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
-                else void doTranslateImage(retryData, hoverImg)
+                const retryPayload = await getPayloadForImage(hoverImg)
+                if (!retryPayload) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
+                else void doTranslateImage(retryPayload, hoverImg)
               })()
             })
           } catch (e) {
@@ -535,7 +559,7 @@ function handleTranslateSelection() {
           }
           return
         }
-        await doTranslateImage(dataUrl, hoverImg)
+        await doTranslateImage(payload, hoverImg)
       })()
       return
     }
@@ -674,26 +698,22 @@ export function initShortcut() {
     // If anchor is an image, route to image translation
     if (anchor instanceof HTMLImageElement) {
       void (async () => {
-        const helpers = resolveImageHelpers()
-        const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-        let dataUrl: string | null = null
-        try { dataUrl = await getter(anchor) } catch { dataUrl = null }
-        if (!dataUrl) {
+        const payload = await getPayloadForImage(anchor)
+        if (!payload) {
           const msg = getImageErrorMessage(anchor, true)
           try {
             await injectLoading(anchor)
             updateCard(anchor, 'error', msg, '错误', () => {
               void (async () => {
-                let retryData: string | null = null
-                try { retryData = await getter(anchor) } catch { retryData = null }
-                if (!retryData) updateCard(anchor, 'error', getImageErrorMessage(anchor, true), '错误', () => {})
-                else void doTranslateImage(retryData, anchor)
+                const retryPayload = await getPayloadForImage(anchor)
+                if (!retryPayload) updateCard(anchor, 'error', getImageErrorMessage(anchor, true), '错误', () => {})
+                else void doTranslateImage(retryPayload, anchor)
               })()
             })
           } catch {}
           return
         }
-        await doTranslateImage(dataUrl, anchor)
+        await doTranslateImage(payload, anchor)
       })()
       return
     }
@@ -706,26 +726,22 @@ export function initShortcut() {
       try {
         if (anchor.contains(hoverImg)) {
           void (async () => {
-            const helpers = resolveImageHelpers()
-            const getter = helpers.getImageDataURLForTranslation || getImageDataURLFallback
-            let dataUrl: string | null = null
-            try { dataUrl = await getter(hoverImg) } catch { dataUrl = null }
-            if (!dataUrl) {
+            const payload = await getPayloadForImage(hoverImg)
+            if (!payload) {
               const msg = getImageErrorMessage(hoverImg, true)
               try {
                 await injectLoading(hoverImg)
                 updateCard(hoverImg, 'error', msg, '错误', () => {
                   void (async () => {
-                    let retryData: string | null = null
-                    try { retryData = await getter(hoverImg) } catch { retryData = null }
-                    if (!retryData) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
-                    else void doTranslateImage(retryData, hoverImg)
+                    const retryPayload = await getPayloadForImage(hoverImg)
+                    if (!retryPayload) updateCard(hoverImg, 'error', getImageErrorMessage(hoverImg, true), '错误', () => {})
+                    else void doTranslateImage(retryPayload, hoverImg)
                   })()
                 })
               } catch {}
               return
             }
-            await doTranslateImage(dataUrl, hoverImg)
+            await doTranslateImage(payload, hoverImg)
           })()
           return
         }

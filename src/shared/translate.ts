@@ -66,7 +66,7 @@ export function buildChatBody(model: string, target: string, text: string): Chat
   return { body, hyTarget, modelForRequest, sys }
 }
 
-export function buildVisionBody(model: string, target: string, dataUrl: string): ChatBody {
+export function buildVisionBody(model: string, target: string, imageUrl: string): ChatBody {
   const isHy = isHyModel(model)
   const hyTarget = isHy ? toHyTarget(target, '') : ''
   const modelForRequest = isHy && hyTarget && !model.includes(':') ? `${model}:${hyTarget}` : model
@@ -82,7 +82,7 @@ export function buildVisionBody(model: string, target: string, dataUrl: string):
       { role: 'system', content: sys },
       { role: 'user', content: [
         { type: 'text', text: `Translate to ${hyTarget || target}` },
-        { type: 'image_url', image_url: { url: dataUrl } },
+        { type: 'image_url', image_url: { url: imageUrl } },
       ] },
     ],
     temperature: 0.3,
@@ -103,7 +103,9 @@ export type TranslateReq = {
   requestId: string
   kind?: 'text' | 'image'
   imageDataUrl?: string
+  imageUrl?: string
 }
+
 
 export type TranslateRes =
   | { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: true; translated: string; model: string; annotatedDataUrl?: string }
@@ -284,9 +286,9 @@ export async function callLLM(baseUrl: string, apiKey: string, model: string, ta
   }
 }
 
-export async function callVisionLLM(baseUrl: string, apiKey: string, model: string, target: string, dataUrl: string, signal?: AbortSignal): Promise<{ text: string; annotatedDataUrl: string }> {
+export async function callVisionLLM(baseUrl: string, apiKey: string, model: string, target: string, imageUrl: string, signal?: AbortSignal): Promise<{ text: string; annotatedDataUrl: string }> {
   const isHy = isHyModel(model)
-  const { body, hyTarget, modelForRequest } = buildVisionBody(model, target, dataUrl)
+  const { body, hyTarget, modelForRequest } = buildVisionBody(model, target, imageUrl)
   if (isHy) {
     const base = normalizeBaseUrl(baseUrl)
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -308,8 +310,9 @@ export async function callVisionLLM(baseUrl: string, apiKey: string, model: stri
         model,
         target,
         hyTarget,
-        dataUrlLength: dataUrl.length,
-        dataUrlPreview: dataUrl.slice(0, 80),
+        imageUrlLength: imageUrl.length,
+        imageUrlPreview: imageUrl.slice(0, 80),
+        imageUrlIsHttp: /^https?:\/\//i.test(imageUrl),
         headers: sanitizeHeaders(headers),
         bodyPreview: JSON.stringify(body).slice(0, 500),
       })
@@ -357,8 +360,9 @@ export async function callVisionLLM(baseUrl: string, apiKey: string, model: stri
       model,
       target,
       modelForRequest,
-      dataUrlLength: dataUrl.length,
-      dataUrlPreview: dataUrl.slice(0, 80),
+      imageUrlLength: imageUrl.length,
+      imageUrlPreview: imageUrl.slice(0, 80),
+      imageUrlIsHttp: /^https?:\/\//i.test(imageUrl),
     })
     if (err instanceof Error) {
       const anyErr = err as unknown as { status?: number; error?: { message?: string }; message?: string }

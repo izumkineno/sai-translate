@@ -186,10 +186,14 @@ chrome.runtime.onMessage.addListener(
       typeof req.requestId === 'string' && req.requestId ? req.requestId : `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
     const rawText = typeof req.text === 'string' ? req.text : String(req.text ?? '')
 
-    // Use typed access for optional vision fields (avoids inline cast)
+    // Use typed access for optional vision fields (avoids inline cast) — hybrid: data:* or http(s) URL
     let rawImageDataUrl = ''
     if ('imageDataUrl' in req && typeof req.imageDataUrl === 'string') {
       rawImageDataUrl = req.imageDataUrl.trim()
+    }
+    let rawImageUrl = ''
+    if ('imageUrl' in req && typeof req.imageUrl === 'string') {
+      rawImageUrl = req.imageUrl.trim()
     }
     let kindRaw = ''
     if ('kind' in req && typeof req.kind === 'string') {
@@ -207,15 +211,17 @@ chrome.runtime.onMessage.addListener(
     }
 
     void (async () => {
-      // Determine image vs text before creating timeout
+      // Determine image vs text before creating timeout — hybrid: data: or http(s) far-end
+      const trimmedTextForCheck = rawText.trim()
+      const textIsDataUrlCheck = trimmedTextForCheck.toLowerCase().startsWith('data:image/')
+      const textIsHttpCheck = /^https?:\/\/\S+/i.test(trimmedTextForCheck)
       let isImage: boolean
       if (kindRaw === 'image') isImage = true
       else if (kindRaw === 'text') isImage = false
       else {
-        const textIsDataUrl = rawText.trim().toLowerCase().startsWith('data:image/')
-        isImage = !!rawImageDataUrl || textIsDataUrl
+        isImage = !!rawImageUrl || !!rawImageDataUrl || textIsDataUrlCheck || textIsHttpCheck
       }
-      const dataUrlForImage = rawImageDataUrl || (rawText.trim().toLowerCase().startsWith('data:image/') ? rawText.trim() : '')
+      const imageUrlForVision = rawImageUrl || rawImageDataUrl || (textIsDataUrlCheck || textIsHttpCheck ? trimmedTextForCheck : '')
       const timeoutMs = isImage ? TIMEOUT_IMAGE : TIMEOUT_TEXT
 
       const controller = new AbortController()
@@ -247,11 +253,20 @@ chrome.runtime.onMessage.addListener(
 
       try {
         if (isImage) {
-          // Vision branch - validate dataUrl (skip TEXT_LIMIT)
-          const dataUrl = dataUrlForImage
-          // Inline validation to avoid tiny function (complies with ts-no-tiny-functions)
-          if (!dataUrl || !/^data:image\/[^;]+(?:;charset=[^;]+)?;base64,/i.test(dataUrl.trim())) {
-            throw new Error('无效的图片数据，需为 data:image/*;base64 格式')
+          // Vision branch - hybrid validation: data:* 或 http(s) 远端（OPENAI_COMPAT_API.md §3.1）
+          const imageUrl = imageUrlForVision
+          const isData = /^data:image\/[^;]+(?:;charset=[^;]+)?;base64,/i.test(imageUrl.trim())
+          const isHttp = /^https?:\/\//i.test(imageUrl.trim())
+          if (!imageUrl || (!isData && !isHttp)) {
+            throw new Error('无效的图片数据，需为 data:image/*;base64 或 http(s) URL 格式')
+          }
+          if (isHttp) {
+            try {
+              const u = new URL(imageUrl.trim())
+              if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error()
+            } catch {
+              throw new Error('无效的图片 URL')
+            }
           }
 
           const target = await resolveTarget(req.target)
@@ -263,7 +278,7 @@ chrome.runtime.onMessage.addListener(
 
           // Vision fetch with 40s timeout and pending map; live check handled via getActiveSource + callVisionLLM error mapping
           const result = await Promise.race([
-            callVisionLLM(source.baseUrl, source.apiKey, source.model, target, dataUrl, controller.signal),
+            callVisionLLM(source.baseUrl, source.apiKey, source.model, target, imageUrl, controller.signal),
             timeoutPromise,
           ])
 
@@ -338,11 +353,13 @@ chrome.runtime.onMessage.addListener(
             baseUrl: capturedBaseUrl,
           }
           if (isImage) {
-            const preview = dataUrlForImage.slice(0, 80)
+            const preview = imageUrlForVision.slice(0, 80)
+            const isHttpPreview = /^https?:\/\//i.test(imageUrlForVision)
             logFetchFailed('background:SAI_TRANSLATE', e, {
               ...baseDetails,
-              dataUrlLength: dataUrlForImage.length,
-              dataUrlPreview: preview,
+              imageUrlLength: imageUrlForVision.length,
+              imageUrlPreview: preview,
+              imageUrlIsHttp: isHttpPreview,
             })
           } else {
             logFetchFailed('background:SAI_TRANSLATE', e, {

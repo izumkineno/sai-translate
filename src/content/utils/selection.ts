@@ -572,7 +572,111 @@ export function isValidText(text: string): boolean {
   return true
 }
 
-// --- Image helpers for Vision translation (same-origin only) ---
+// --- Image helpers for Vision translation — hybrid base64 / URL  ---
+// 策略：小图（同源且 <=1M 像素且边长 <=1600）走 canvas base64；
+// 大图（>1M 像素或边长>1600）或跨域（origin 不同）直接走 http(s) URL，由服务端 reqwest 拉取跳过 CORS。
+// 对应 OPENAI_COMPAT_API.md §3.1：image_url.url 支持 data:* 与 http(s) 远端混用。
+export type ImagePayload = { url: string; mode: 'data' | 'url' }
+
+export function isCrossOriginUrl(src: string): boolean {
+  try {
+    const u = new URL(src, location.href)
+    return u.origin !== location.origin
+  } catch {
+    return false
+  }
+}
+
+export function isLargeImage(img: HTMLImageElement): boolean {
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  if (w <= 0 || h <= 0) return false
+  const pixels = w * h
+  if (pixels > 1_000_000) return true
+  if (Math.max(w, h) > 1600) return true
+  return false
+}
+
+// 内部：canvas 编码为 dataURL（不含 background fetch 兜底，供上层决策）
+async function canvasEncodeForPayload(img: HTMLImageElement): Promise<string | null> {
+  if (!img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0) return null
+  let w = img.naturalWidth
+  let h = img.naturalHeight
+  const MAX_SIDE = 8192
+  const MAX_PIXELS = 33_000_000
+  let scale = Math.min(1, MAX_SIDE / Math.max(w, h), Math.sqrt(MAX_PIXELS / (w * h)))
+  if (!isFinite(scale) || scale <= 0) scale = 1
+  if (scale < 1) {
+    w = Math.max(1, Math.floor(w * scale))
+    h = Math.max(1, Math.floor(h * scale))
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const src = (img.currentSrc || img.src || '').toLowerCase()
+  const mime = src.endsWith('.webp') ? 'image/webp' : src.endsWith('.png') ? 'image/png' : 'image/jpeg'
+  const quality = mime === 'image/png' ? undefined : 0.92
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  try {
+    if (mime === 'image/jpeg') {
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, w, h)
+    }
+    ctx.drawImage(img, 0, 0, w, h)
+  } catch {
+    return null
+  }
+  try {
+    return quality !== undefined ? canvas.toDataURL(mime, quality) : canvas.toDataURL(mime)
+  } catch {
+    return null
+  }
+}
+
+export async function getImagePayloadForTranslation(img: HTMLImageElement): Promise<ImagePayload | null> {
+  if (!img || !(img instanceof HTMLImageElement)) return null
+  if (!isTranslatableImage(img)) return null
+  const rawSrc = (img.currentSrc || img.src || '').trim()
+  if (!rawSrc) return null
+  const low = rawSrc.toLowerCase()
+  // 已是 data: 直接返回
+  if (low.startsWith('data:image/')) {
+    return { url: rawSrc, mode: 'data' }
+  }
+  if (low.startsWith('blob:')) {
+    // blob 仅能 canvas 转；服务端不支持 blob:
+    const data = await canvasEncodeForPayload(img)
+    if (data) return { url: data, mode: 'data' }
+    return null
+  }
+  // http(s) 远端
+  try {
+    const u = new URL(rawSrc, location.href)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  } catch {
+    return null
+  }
+  const cross = isCrossOriginUrl(rawSrc)
+  const large = isLargeImage(img)
+  if (cross || large) {
+    return { url: rawSrc, mode: 'url' }
+  }
+  // 小图同源：优先 canvas base64，失败回退 URL
+  try {
+    const data = await canvasEncodeForPayload(img)
+    if (data) {
+      // 仍做 10MiB/14M guard，与现有 getImageDataURLForTranslation 一致
+      const b64 = (data.split(',')[1] || '')
+      const bytes = Math.ceil(b64.length * 0.75)
+      if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
+        return { url: data, mode: 'data' }
+      }
+      // 过大仍走 URL
+    }
+  } catch {}
+  return { url: rawSrc, mode: 'url' }
+}
 
 export function isTranslatableImage(img: HTMLImageElement): boolean {
   if (!img || img.tagName !== 'IMG') return false
@@ -590,7 +694,6 @@ export function isTranslatableImage(img: HTMLImageElement): boolean {
       // 允许跨域（pixiv www.pixiv.net → i.pximg.net 等 CDN），不再卡同源
       // 仅拦截非 http(s) 与 chrome 域
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
-      // host_permissions 已含 https://*/* 与 http://*/*，跨域图片由后续 getImageDataURL 的 canvas→background fetch 兜底
     } catch {
       return false
     }
