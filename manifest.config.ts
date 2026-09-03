@@ -40,6 +40,10 @@ export default defineManifest({
       suggested_key: { default: 'Alt+Shift+T', mac: 'Alt+Shift+T' },
       description: '翻译选中/悬停块并行下展示',
     },
+    'translate-selection-only': {
+      suggested_key: { default: 'Alt+Shift+S', mac: 'Alt+Shift+S' },
+      description: '仅翻译选中文本（翻译窗口）',
+    },
     'toggle-inline': {
       suggested_key: { default: 'Alt+Shift+Y', mac: 'Alt+Shift+Y' },
       description: '显示/隐藏译文',

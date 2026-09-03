@@ -20,6 +20,11 @@ export type HoverConfig = {
   imageMode: ImagePayloadMode
   displayMode: DisplayMode
   immersiveMarkerColor: string
+  selectionEnabled: boolean
+  selectionAuto: boolean
+  selectionShortcut: boolean
+  selectionMinLength: number
+  selectionKey: string
 }
 export const DEFAULT_HOVER_CONFIG: HoverConfig = {
   hoverEnabled: true,
@@ -37,6 +42,11 @@ export const DEFAULT_HOVER_CONFIG: HoverConfig = {
   imageMode: 'auto',
   displayMode: 'card',
   immersiveMarkerColor: '#409eff',
+  selectionEnabled: true,
+  selectionAuto: false,
+  selectionShortcut: true,
+  selectionKey: 'KeyR',
+  selectionMinLength: 2,
 }
 
 // Keep alias for convenience / backwards compat with spec wording
@@ -59,6 +69,11 @@ export const STORAGE_KEYS = {
   imageMode: 'sai_translate_image_mode',
   displayMode: 'sai_translate_display_mode',
   immersiveMarkerColor: 'sai_translate_immersive_marker_color',
+  selectionEnabled: 'sai_selection_enabled',
+  selectionAuto: 'sai_selection_auto_translate',
+  selectionShortcut: 'sai_selection_shortcut',
+  selectionKey: 'sai_selection_key',
+  selectionMinLength: 'sai_selection_min_length',
 } as const
 // Also export individual key constants for direct chrome.storage access (content/background)
 export const HOVER_ENABLED_KEY = STORAGE_KEYS.hoverEnabled
@@ -76,6 +91,11 @@ export const SHORTCUT_KEY = STORAGE_KEYS.shortcutKey
 export const IMAGE_MODE_KEY = STORAGE_KEYS.imageMode
 export const DISPLAY_MODE_KEY = STORAGE_KEYS.displayMode
 export const IMMERSIVE_MARKER_COLOR_KEY = STORAGE_KEYS.immersiveMarkerColor
+export const SELECTION_ENABLED_KEY = STORAGE_KEYS.selectionEnabled
+export const SELECTION_AUTO_KEY = STORAGE_KEYS.selectionAuto
+export const SELECTION_SHORTCUT_KEY = STORAGE_KEYS.selectionShortcut
+export const SELECTION_KEY = STORAGE_KEYS.selectionKey
+export const SELECTION_MIN_LENGTH_KEY = STORAGE_KEYS.selectionMinLength
 
 export function getChromeStorage(): chrome.storage.StorageArea | null {
   try {
@@ -130,6 +150,11 @@ const [shortcutKey, setShortcutKey] = createSignal<string>(DEFAULT_HOVER_CONFIG.
 const [imageMode, setImageMode] = createSignal<ImagePayloadMode>(DEFAULT_HOVER_CONFIG.imageMode)
 const [displayMode, setDisplayMode] = createSignal<DisplayMode>(DEFAULT_HOVER_CONFIG.displayMode)
 const [immersiveMarkerColor, setImmersiveMarkerColor] = createSignal<string>(DEFAULT_HOVER_CONFIG.immersiveMarkerColor)
+const [selectionEnabled, setSelectionEnabled] = createSignal<boolean>(DEFAULT_HOVER_CONFIG.selectionEnabled)
+const [selectionAuto, setSelectionAuto] = createSignal<boolean>(DEFAULT_HOVER_CONFIG.selectionAuto)
+const [selectionShortcut, setSelectionShortcut] = createSignal<boolean>(DEFAULT_HOVER_CONFIG.selectionShortcut)
+const [selectionKey, setSelectionKey] = createSignal<string>(DEFAULT_HOVER_CONFIG.selectionKey)
+const [selectionMinLength, setSelectionMinLength] = createSignal<number>(DEFAULT_HOVER_CONFIG.selectionMinLength)
 
 // Combined signal helper — returns snapshot of all fields
 function getHoverConfig(): HoverConfig {
@@ -149,6 +174,11 @@ function getHoverConfig(): HoverConfig {
     imageMode: imageMode(),
     displayMode: displayMode(),
     immersiveMarkerColor: immersiveMarkerColor(),
+    selectionEnabled: selectionEnabled(),
+    selectionAuto: selectionAuto(),
+    selectionShortcut: selectionShortcut(),
+    selectionKey: selectionKey(),
+    selectionMinLength: selectionMinLength(),
   }
 }
 
@@ -173,6 +203,11 @@ function applyRaw(raw: Record<string, unknown>) {
   setImageMode(parseImageMode(raw[STORAGE_KEYS.imageMode], DEFAULT_HOVER_CONFIG.imageMode))
   setDisplayMode(parseDisplayMode(raw[STORAGE_KEYS.displayMode], DEFAULT_HOVER_CONFIG.displayMode))
   setImmersiveMarkerColor(parseMarkerColor(raw[STORAGE_KEYS.immersiveMarkerColor], DEFAULT_HOVER_CONFIG.immersiveMarkerColor))
+  setSelectionKey(parseString(raw[STORAGE_KEYS.selectionKey], DEFAULT_HOVER_CONFIG.selectionKey))
+  setSelectionShortcut(parseBoolean(raw[STORAGE_KEYS.selectionShortcut], DEFAULT_HOVER_CONFIG.selectionShortcut))
+  setSelectionEnabled(parseBoolean(raw[STORAGE_KEYS.selectionEnabled], DEFAULT_HOVER_CONFIG.selectionEnabled))
+  setSelectionAuto(parseBoolean(raw[STORAGE_KEYS.selectionAuto], DEFAULT_HOVER_CONFIG.selectionAuto))
+  setSelectionMinLength(Math.max(1, Math.min(50, Math.round(parseNumber(raw[STORAGE_KEYS.selectionMinLength], DEFAULT_HOVER_CONFIG.selectionMinLength)))))
 }
 
 export async function loadHoverConfig(): Promise<HoverConfig> {
@@ -223,6 +258,11 @@ function toStorageRecord(cfg: HoverConfig): Record<string, unknown> {
     [STORAGE_KEYS.imageMode]: cfg.imageMode,
     [STORAGE_KEYS.displayMode]: cfg.displayMode,
     [STORAGE_KEYS.immersiveMarkerColor]: cfg.immersiveMarkerColor,
+    [STORAGE_KEYS.selectionKey]: cfg.selectionKey,
+    [STORAGE_KEYS.selectionShortcut]: cfg.selectionShortcut,
+    [STORAGE_KEYS.selectionEnabled]: cfg.selectionEnabled,
+    [STORAGE_KEYS.selectionAuto]: cfg.selectionAuto,
+    [STORAGE_KEYS.selectionMinLength]: cfg.selectionMinLength,
   }
 }
 function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
@@ -241,7 +281,12 @@ function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
   if (patch.shortcutKey !== undefined) rec[STORAGE_KEYS.shortcutKey] = patch.shortcutKey
   if (patch.imageMode !== undefined) rec[STORAGE_KEYS.imageMode] = patch.imageMode
   if (patch.displayMode !== undefined) rec[STORAGE_KEYS.displayMode] = patch.displayMode
+  if (patch.selectionKey !== undefined) rec[STORAGE_KEYS.selectionKey] = patch.selectionKey
   if (patch.immersiveMarkerColor !== undefined) rec[STORAGE_KEYS.immersiveMarkerColor] = patch.immersiveMarkerColor
+  if (patch.selectionShortcut !== undefined) rec[STORAGE_KEYS.selectionShortcut] = patch.selectionShortcut
+  if (patch.selectionEnabled !== undefined) rec[STORAGE_KEYS.selectionEnabled] = patch.selectionEnabled
+  if (patch.selectionAuto !== undefined) rec[STORAGE_KEYS.selectionAuto] = patch.selectionAuto
+  if (patch.selectionMinLength !== undefined) rec[STORAGE_KEYS.selectionMinLength] = patch.selectionMinLength
   return rec
 }
 
@@ -279,6 +324,11 @@ function applyPatchToSignals(patch: Partial<HoverConfig>) {
   if (patch.imageMode !== undefined) setImageMode(patch.imageMode)
   if (patch.displayMode !== undefined) setDisplayMode(patch.displayMode)
   if (patch.immersiveMarkerColor !== undefined) setImmersiveMarkerColor(patch.immersiveMarkerColor)
+  if (patch.selectionKey !== undefined) setSelectionKey(patch.selectionKey)
+  if (patch.selectionShortcut !== undefined) setSelectionShortcut(patch.selectionShortcut)
+  if (patch.selectionEnabled !== undefined) setSelectionEnabled(patch.selectionEnabled)
+  if (patch.selectionAuto !== undefined) setSelectionAuto(patch.selectionAuto)
+  if (patch.selectionMinLength !== undefined) setSelectionMinLength(patch.selectionMinLength)
 }
 
 export async function updateHoverConfig(patch: Partial<HoverConfig>): Promise<HoverConfig> {
@@ -339,6 +389,11 @@ export function useHoverConfig() {
     setDisplayMode,
     immersiveMarkerColor,
     setImmersiveMarkerColor,
+    selectionEnabled,
+    selectionAuto,
+    selectionShortcut,
+    selectionKey,
+    selectionMinLength,
     loadHoverConfig,
     load,
     persistHoverConfig,
@@ -382,6 +437,16 @@ export {
   setDisplayMode,
   immersiveMarkerColor,
   setImmersiveMarkerColor,
+  selectionEnabled,
+  setSelectionEnabled,
+  selectionAuto,
+  setSelectionAuto,
+  selectionShortcut,
+  setSelectionShortcut,
+  selectionKey,
+  setSelectionKey,
+  selectionMinLength,
+  setSelectionMinLength,
   hoverConfig,
   getHoverConfig,
 }

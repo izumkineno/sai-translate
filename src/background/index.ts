@@ -488,6 +488,11 @@ chrome.commands.onCommand.addListener(async (command: string) => {
       const tab = tabs[0]
       if (!tab?.id) return
       await chrome.tabs.sendMessage(tab.id, { type: 'SAI_TRIGGER_TRANSLATE' }).catch(() => {})
+    } else if (command === 'translate-selection-only') {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+      const tab = tabs[0]
+      if (!tab?.id) return
+      await chrome.tabs.sendMessage(tab.id, { type: 'SAI_TRIGGER_SELECTION' }).catch(() => {})
     } else if (command === 'toggle_inline' || command === 'toggle-inline') {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
       const tab = tabs[0]

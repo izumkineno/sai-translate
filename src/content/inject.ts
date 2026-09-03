@@ -573,13 +573,13 @@ function isInlineEnabledCache(): Promise<boolean> {
   }).catch(() => true)
 }
 
-export async function injectLoading(anchor: HTMLElement): Promise<HTMLElement> {
+export async function injectLoading(anchor: HTMLElement, mode?: 'card' | 'immersive'): Promise<HTMLElement> {
   const enabled = await isInlineEnabledCache()
   if (!enabled) throw new Error('行下翻译已关闭，请在配置页开启')
   await refreshDisplayPrefs()
   // 新一轮翻译开始：旧译文即将被替换，先清除成功标记（失败/关闭路径同样清除）
   translatedAnchors.delete(anchor)
-  if (displayModeNow === 'immersive' && anchor.tagName !== 'IMG') {
+  if ((mode ?? displayModeNow) === 'immersive' && anchor.tagName !== 'IMG') {
     const wrap = buildImmersive(anchor, 'loading', '')
     placeAfter(anchor, wrap)
     observe(anchor, wrap)
@@ -595,8 +595,8 @@ export async function injectLoading(anchor: HTMLElement): Promise<HTMLElement> {
   return host
 }
 
-export function updateCard(anchor: HTMLElement, status: CardStatus, text: string, meta: string, onRetranslate: () => void, annotatedDataUrl?: string) {
-  const wantImmersive = displayModeNow === 'immersive' && anchor.tagName !== 'IMG'
+export function updateCard(anchor: HTMLElement, status: CardStatus, text: string, meta: string, onRetranslate: () => void, annotatedDataUrl?: string, mode?: 'card' | 'immersive') {
+  const wantImmersive = (mode ?? displayModeNow) === 'immersive' && anchor.tagName !== 'IMG'
   let host = cardMap.get(anchor)
   // 形态不符（设置页中途切换显示模式）→ 拆掉按新形态重建
   if (host && isImmersiveHost(host) !== wantImmersive) {

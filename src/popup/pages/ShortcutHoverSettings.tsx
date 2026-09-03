@@ -70,19 +70,20 @@ export default function ShortcutHoverSettings() {
   return (
     <div style={{ display: 'flex', 'flex-direction': 'column', gap: '16px' }}>
       <div class="n-layout-content__header">
-        <div class="n-layout-content__title">快捷键 / Hover</div>
+        <div class="n-layout-content__title">悬浮翻译</div>
         <span style={{ 'font-size': '12px', color: 'var(--n-text-3)' }}>沉浸式方案</span>
       </div>
 
       {/* 快捷键 */}
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
-          <span class="n-card-header__title">快捷键</span>
+          <span class="n-card-header__title">触发快捷键</span>
           <span class="n-card-header__extra">双轨</span>
         </div>
         <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '12px' }}>
           <div class="n-alert n-alert--info" style={{ 'font-size': '12px' }}>
             主快捷键 <b>Alt+Shift+T</b>（系统级）可在 <button class="n-button n-button--text" style="padding:0 4px" onClick={openShortcuts} type="button">chrome://extensions/shortcuts</button> 修改<br />
+            选词键 <b>Alt+Shift+S</b>（系统级，仅翻译选区）与页内选词键可在划词页配置<br />
             页内快捷键 <b>Alt+{shortcutKey().replace('Key','')}</b> 可在此配置
           </div>
           <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
@@ -203,7 +204,7 @@ export default function ShortcutHoverSettings() {
       {/* Hover 预选 */}
       <div class="n-card n-card--bordered">
         <div class="n-card-header">
-          <span class="n-card-header__title">Hover 预选高亮</span>
+          <span class="n-card-header__title">悬浮预选高亮</span>
           <span class="n-card-header__extra">不调 LLM</span>
         </div>
         <div class="n-card__content" style={{ display: 'flex', 'flex-direction': 'column', gap: '10px' }}>
@@ -270,7 +271,7 @@ export default function ShortcutHoverSettings() {
       </div>
 
       <div style={{ 'font-size': '11px', color: '#9ca3af', 'text-align': 'center' }}>
-        Hover 仅预选不发请求，按 Alt+Shift+T / Alt+Q 翻译 hover 块或选中文本
+        悬浮仅预选不发请求，按 Alt+Shift+T / Alt+Q 翻译悬浮块或选中文本
       </div>
     </div>
   )

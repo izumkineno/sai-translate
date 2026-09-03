@@ -21,6 +21,11 @@ let shortcutKey = 'KeyQ'
 let targetLang = '中文'
 let imageMode: ImagePayloadMode = 'auto'
 let displayMode: 'card' | 'immersive' = 'card'
+let selectionEnabled = true
+let selectionAuto = false
+let selectionShortcut = true
+let selectionKey = 'KeyR'
+let selectionMinLength = 2
 
 function parseImageMode(v: unknown): ImagePayloadMode {
   return v === 'url' || v === 'base64' || v === 'auto' ? v : 'auto'
@@ -28,7 +33,7 @@ function parseImageMode(v: unknown): ImagePayloadMode {
 
 async function loadConfig() {
   try {
-    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang', 'sai_translate_image_mode', 'sai_translate_display_mode'])
+    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang', 'sai_translate_image_mode', 'sai_translate_display_mode', 'sai_selection_enabled', 'sai_selection_auto_translate', 'sai_selection_shortcut', 'sai_selection_min_length'])
     const sk = raw['sai_translate_shortcut_key']
     if (typeof sk === 'string' && sk) shortcutKey = sk
     const tl = raw['sai_translate_target_lang']
@@ -37,6 +42,16 @@ async function loadConfig() {
     imageMode = parseImageMode(im)
     const dm = raw['sai_translate_display_mode']
     displayMode = dm === 'immersive' ? 'immersive' : 'card'
+    const se = raw['sai_selection_enabled']
+    if (typeof se === 'boolean') selectionEnabled = se
+    const sa = raw['sai_selection_auto_translate']
+    if (typeof sa === 'boolean') selectionAuto = sa
+    const ss = raw['sai_selection_shortcut']
+    if (typeof ss === 'boolean') selectionShortcut = ss
+    const skey = raw['sai_selection_key']
+    if (typeof skey === 'string' && skey) selectionKey = skey
+    const ml = raw['sai_selection_min_length']
+    if (typeof ml === 'number' && Number.isFinite(ml)) selectionMinLength = Math.max(1, Math.min(50, Math.round(ml)))
   } catch {}
 }
 function genId(): string {
@@ -373,14 +388,17 @@ async function doTranslateSerializedRetry(anchor: HTMLElement, explicitTarget?: 
   void doTranslate(getBlockText(anchor), anchor, explicitTarget)
 }
 
-
-async function doTranslate(text: string, anchor: HTMLElement | null, explicitTarget?: string, opts?: { force?: boolean }) {
+async function doTranslate(text: string, anchor: HTMLElement | null, explicitTarget?: string, opts?: { force?: boolean; card?: boolean }) {
   const normalized = text.trim()
+  // 划词强制翻译窗口（card）：跳过沉浸式分支 + 绘制阶段同样锁定卡片形态，不受全局 displayMode 影响
+  const cardOnly = !!opts?.card
+  const cardOpt = cardOnly ? { card: true as const } : undefined
+  const forceMode = cardOnly ? 'card' as const : undefined
   if (!isValidText(normalized)) {
     if (anchor) {
-      const host = await injectLoading(anchor)
+      const host = await injectLoading(anchor, forceMode)
       void host
-      updateCard(anchor, 'error', '未选中有效文本', '错误', () => { void doTranslate(text, anchor, explicitTarget) })
+      updateCard(anchor, 'error', '未选中有效文本', '错误', () => { void doTranslate(text, anchor, explicitTarget, cardOpt) }, undefined, forceMode)
     }
     return
   }
@@ -394,9 +412,7 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
   if (!targetAnchor) targetAnchor = document.body as unknown as HTMLElement
   // 已有译文重复触发 → 转关闭；成功卡片的重译按钮显式 force 直通，避免把“重译”变成“关闭”
   if (!opts?.force && hasTranslatedCard(targetAnchor)) { removeCard(targetAnchor); return }
-  // 沉浸式 + 可克隆 anchor：占位符序列化后单请求，还原落盘（原文只读，行内结构由映射同步）
-  // BODY/超大载荷序列化失败时回退整段块级
-  if (displayMode === 'immersive' && targetAnchor && targetAnchor.tagName !== 'IMG' && targetAnchor.tagName !== 'BODY' && targetAnchor.tagName !== 'HTML' && isClonableAnchor(targetAnchor)) {
+  if (!cardOnly && displayMode === 'immersive' && targetAnchor && targetAnchor.tagName !== 'IMG' && targetAnchor.tagName !== 'BODY' && targetAnchor.tagName !== 'HTML' && isClonableAnchor(targetAnchor)) {
     const ser = SelectionNS.serializeAnchor(targetAnchor)
     if (ser) {
       await doTranslateSerialized(targetAnchor, ser, explicitTarget)
@@ -404,7 +420,7 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     }
   }
   // 沉浸式 + 单元格：同上，嵌套表子树不进外层载荷（含嵌套表的外层格扇出到内格队列）
-  if (displayMode === 'immersive' && targetAnchor && isCellAnchor(targetAnchor)) {
+  if (!cardOnly && displayMode === 'immersive' && targetAnchor && isCellAnchor(targetAnchor)) {
     try {
       if (targetAnchor.querySelector('table')) {
         // 直接调用不经过 doTranslate，避免外层格重复扇出；深层嵌套逐层收敛
@@ -427,7 +443,7 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     try {
       const expanded = expandContainerToParagraphs(targetAnchor)
       if (expanded.length >= 1) {
-        await translateBlocksQueue(expanded, (b) => getBlockText(b), explicitTarget)
+        await translateBlocksQueue(expanded, (b) => getBlockText(b), explicitTarget, cardOpt)
         return
       }
       const scope = (() => {
@@ -439,16 +455,16 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
       const cells = Array.from(scope.querySelectorAll('td,th')) as HTMLElement[]
       const valid = cells.filter((c) => getBlockText(c) && isValidText(getBlockText(c)))
       if (valid.length >= 1) {
-        await translateBlocksQueue(valid.slice(0, 50), (b) => getBlockText(b).trim().slice(0, 4000), explicitTarget)
+        await translateBlocksQueue(valid.slice(0, 50), (b) => getBlockText(b).trim().slice(0, 4000), explicitTarget, cardOpt)
         return
       }
     } catch {}
   }
   try {
-    await injectLoading(targetAnchor)
+    await injectLoading(targetAnchor, forceMode)
   } catch (e) {
     const msg = e instanceof Error ? e.message : '注入失败'
-    updateCard(targetAnchor, 'error', msg, '错误', () => { void doTranslate(text, targetAnchor, explicitTarget) })
+    updateCard(targetAnchor, 'error', msg, '错误', () => { void doTranslate(text, targetAnchor, explicitTarget, cardOpt) }, undefined, forceMode)
     return
   }
   const req: TranslateReq = {
@@ -463,14 +479,14 @@ async function doTranslate(text: string, anchor: HTMLElement | null, explicitTar
     const res = await send()
     if (res.ok) {
       const translated = typeof res.translated === 'string' ? res.translated : ''
-      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslate(text, targetAnchor, explicitTarget, { force: true }) })
+      updateCard(targetAnchor, 'success', translated, `${res.model || 'LLM'} · ${req.target}`, () => { void doTranslate(text, targetAnchor, explicitTarget, { force: true, ...cardOpt }) }, undefined, forceMode)
     } else {
       const err = typeof res.error === 'string' ? res.error : '翻译失败'
-      updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslate(text, targetAnchor, explicitTarget) })
+      updateCard(targetAnchor, 'error', err, '错误', () => { void doTranslate(text, targetAnchor, explicitTarget, cardOpt) }, undefined, forceMode)
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : '请求失败'
-    updateCard(targetAnchor, 'error', msg.slice(0, 200), '错误', () => { void doTranslate(text, targetAnchor, explicitTarget) })
+    updateCard(targetAnchor, 'error', msg.slice(0, 200), '错误', () => { void doTranslate(text, targetAnchor, explicitTarget, cardOpt) }, undefined, forceMode)
   }
 }
 
@@ -557,6 +573,7 @@ async function translateBlocksQueue(
   blocks: HTMLElement[],
   getText: (b: HTMLElement) => string,
   explicitTarget?: string,
+  opts?: { card?: boolean },
 ) {
   const items = blocks
     .map((b) => ({ anchor: b, text: getText(b).trim().slice(0, 4000) }))
@@ -574,7 +591,7 @@ async function translateBlocksQueue(
 
   if (uniqItems.length === 1) {
     const it = uniqItems[0]!
-    await doTranslate(it.text, it.anchor, explicitTarget)
+    await doTranslate(it.text, it.anchor, explicitTarget, opts)
     return
   }
 
@@ -586,7 +603,7 @@ async function translateBlocksQueue(
       if (cur >= uniqItems.length) break
       const item = uniqItems[cur]!
       try {
-        await doTranslate(item.text, item.anchor, explicitTarget)
+        await doTranslate(item.text, item.anchor, explicitTarget, opts)
       } catch {
         // doTranslate 内部已通过 updateCard 展示错误，这里不抛
       }
@@ -642,9 +659,25 @@ async function translateImagesQueue(imgs: HTMLImageElement[], explicitTarget?: s
   })
   await Promise.all(workers)
 }
+// 独立选词键入口：仅翻译选区，无选区直接忽略（不回退悬浮锚点）
+function handleTranslateSelectionOnly() {
+  if (!selectionEnabled) return
+  try {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return
+  } catch { return }
+  handleTranslateSelection()
+}
 
 function handleTranslateSelection() {
   const { text, range } = getSelectedText()
+  // 划词总开关：有选区但已关闭 → 直接返回（悬浮锚点路径不受影响）
+  if (!selectionEnabled) {
+    try {
+      const sel = window.getSelection()
+      if ((sel && !sel.isCollapsed) || (text && text.trim())) return
+    } catch {}
+  }
 
   // 0) 图片分支优先：Range 覆盖的图（多图并发 3，单图直译）
   if (range) {
@@ -749,7 +782,7 @@ function handleTranslateSelection() {
     try {
       const blocks = getBlocksInRange(range)
       if (blocks.length > 1) {
-        void translateBlocksQueue(blocks, (b) => getTextForQueuedBlock(b, range))
+        void translateBlocksQueue(blocks, (b) => getTextForQueuedBlock(b, range), undefined, { card: true })
         return
       }
       if (blocks.length === 1) {
@@ -761,7 +794,7 @@ function handleTranslateSelection() {
             try { return (range as Range).intersectsNode(child) } catch { return true }
           })
           const targets = filtered.length >= 2 ? filtered : expanded
-          void translateBlocksQueue(targets, (b) => getTextForQueuedBlock(b, range))
+          void translateBlocksQueue(targets, (b) => getTextForQueuedBlock(b, range), undefined, { card: true })
           return
         }
         // 单块：含内联标记的段一律整段翻译，修复"<a>/<em> 边界截断"现象
@@ -772,13 +805,13 @@ function handleTranslateSelection() {
           const full = getBlockText(single).trim()
           if (isValidText(full)) finalT = full
         }
-        if (finalT && isValidText(finalT)) { void doTranslate(finalT, single); return }
+        if (finalT && isValidText(finalT)) { void doTranslate(finalT, single, undefined, { card: true }); return }
         if (expanded.length > 1) {
           const filtered = expanded.filter((child: HTMLElement) => {
             try { return (range as Range).intersectsNode(child) } catch { return true }
           })
           const targets = filtered.length >= 2 ? filtered : expanded
-          void translateBlocksQueue(targets, (b) => getTextForQueuedBlock(b, range))
+          void translateBlocksQueue(targets, (b) => getTextForQueuedBlock(b, range), undefined, { card: true })
           return
         }
       }
@@ -793,10 +826,10 @@ function handleTranslateSelection() {
     if (anchor) {
       const expanded = expandContainerToParagraphs(anchor)
       if (expanded.length > 1) {
-        void translateBlocksQueue(expanded, (b) => getTextForQueuedBlock(b, range))
+        void translateBlocksQueue(expanded, (b) => getTextForQueuedBlock(b, range), undefined, { card: true })
         return
       }
-      void doTranslate(text, anchor)
+      void doTranslate(text, anchor, undefined, { card: true })
       return
     }
   }
@@ -806,7 +839,7 @@ function handleTranslateSelection() {
     try {
       const blocks = getBlocksInRange(range)
       if (blocks.length > 0) {
-        void translateBlocksQueue(blocks, (b) => getTextForQueuedBlock(b, range))
+        void translateBlocksQueue(blocks, (b) => getTextForQueuedBlock(b, range), undefined, { card: true })
         return
       }
     } catch {}
@@ -832,11 +865,11 @@ function handleTranslateSelection() {
     if (anchor) {
       const expanded = expandContainerToParagraphs(anchor)
       if (expanded.length > 1) {
-        void translateBlocksQueue(expanded, (b) => getBlockText(b))
+        void translateBlocksQueue(expanded, (b) => getBlockText(b), undefined, { card: true })
         return
       }
     }
-    void doTranslate(text, anchor)
+    void doTranslate(text, anchor, undefined, { card: true })
     return
   }
 
@@ -870,13 +903,64 @@ export function initShortcut() {
       const v = changes['sai_translate_display_mode']?.newValue
       displayMode = v === 'immersive' ? 'immersive' : 'card'
     }
+    if ('sai_selection_enabled' in changes) {
+      const v = changes['sai_selection_enabled']?.newValue
+      if (typeof v === 'boolean') selectionEnabled = v
+    }
+    if ('sai_selection_auto_translate' in changes) {
+      const v = changes['sai_selection_auto_translate']?.newValue
+      if (typeof v === 'boolean') selectionAuto = v
+    }
+    if ('sai_selection_shortcut' in changes) {
+      const v = changes['sai_selection_shortcut']?.newValue
+      if (typeof v === 'boolean') selectionShortcut = v
+    }
+    if ('sai_selection_key' in changes) {
+      const v = changes['sai_selection_key']?.newValue
+      if (typeof v === 'string' && v) selectionKey = v
+    }
+    if ('sai_selection_min_length' in changes) {
+      const v = changes['sai_selection_min_length']?.newValue
+      if (typeof v === 'number' && Number.isFinite(v)) selectionMinLength = Math.max(1, Math.min(50, Math.round(v)))
+    }
   })
   window.addEventListener('keydown', (e) => {
     if (e.altKey && !e.ctrlKey && !e.metaKey && e.shiftKey === false && e.code === shortcutKey) {
+      // 快捷键触发关闭且存在有效选区 → 不拦截、不翻译（悬浮锚点路径同样不走，避免歧义）
+      try {
+        const sel = window.getSelection()
+        if (sel && !sel.isCollapsed && sel.toString().trim() && !selectionShortcut) return
+      } catch {}
       e.preventDefault()
       handleTranslateSelection()
     }
+    // 独立选词键：仅翻译选区；与主页内键同键时让主逻辑处理，避免一次按键触发两次 toggle
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.shiftKey === false && e.code === selectionKey && e.code !== shortcutKey) {
+      if (!selectionEnabled || !selectionShortcut) return
+      e.preventDefault()
+      handleTranslateSelectionOnly()
+    }
     if (e.key === 'Escape') window.dispatchEvent(new CustomEvent('sai:esc'))
+  })
+  // 划词自动翻译：mouseup 后防抖触发，跳过输入区与自家卡片
+  let selTimer: number | null = null
+  window.addEventListener('mouseup', (e) => {
+    if (!selectionAuto || !selectionEnabled) return
+    try {
+      const t = e.target as Element | null
+      if (t && t.closest && t.closest('[data-sai],[data-sai-immersive],[data-sai-inplace],input,textarea,[contenteditable="true"]')) return
+    } catch {}
+    if (selTimer !== null) window.clearTimeout(selTimer)
+    selTimer = window.setTimeout(() => {
+      selTimer = null
+      try {
+        const sel = window.getSelection()
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return
+        const s = sel.toString().trim()
+        if (s.length < selectionMinLength || !isValidText(s)) return
+        handleTranslateSelection()
+      } catch {}
+    }, 450)
   })
   window.addEventListener('sai:iconClick', (ev) => {
     const detail = (ev as CustomEvent).detail as { anchor: HTMLElement | null; sentence?: string } | undefined
@@ -949,6 +1033,11 @@ export function initShortcut() {
     const t = m['type'] as string | undefined
     if (t === 'SAI_TRIGGER_TRANSLATE' || t === 'SAI_COMMAND_TRANSLATE') {
       handleTranslateSelection()
+      try { sendResponse({ ok: true }) } catch {}
+      return true
+    }
+    if (t === 'SAI_TRIGGER_SELECTION') {
+      handleTranslateSelectionOnly()
       try { sendResponse({ ok: true }) } catch {}
       return true
     }

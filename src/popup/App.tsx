@@ -2,9 +2,10 @@ import { createSignal, Show } from 'solid-js'
 import ModelTranslate from './pages/ModelTranslate'
 import Settings from './pages/Settings'
 import ShortcutHoverSettings from './pages/ShortcutHoverSettings'
+import SelectionSettings from './pages/SelectionSettings'
 import './App.css'
 
-type NavKey = 'translate' | 'config' | 'shortcut-hover'
+type NavKey = 'translate' | 'config' | 'hover' | 'selection'
 
 export default function App() {
   const [active, setActive] = createSignal<NavKey>('translate')
@@ -59,10 +60,9 @@ export default function App() {
             </span>
             模型配置
           </button>
-
           <button
-            class={`n-menu-item ${active() === 'shortcut-hover' ? 'n-menu-item--active' : ''}`}
-            onClick={() => setActive('shortcut-hover')}
+            class={`n-menu-item ${active() === 'hover' ? 'n-menu-item--active' : ''}`}
+            onClick={() => setActive('hover')}
             type="button"
           >
             <span class="n-menu-item__icon" aria-hidden="true">
@@ -73,7 +73,21 @@ export default function App() {
                 <path d="M12 8v4" />
               </svg>
             </span>
-            快捷键/Hover
+            悬浮翻译
+          </button>
+
+          <button
+            class={`n-menu-item ${active() === 'selection' ? 'n-menu-item--active' : ''}`}
+            onClick={() => setActive('selection')}
+            type="button"
+          >
+            <span class="n-menu-item__icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 20l4-1 11-11a2.1 2.1 0 0 0-3-3L5 16l-1 4z" />
+                <path d="M13.5 6.5l3 3" />
+              </svg>
+            </span>
+            划词翻译
           </button>
         </nav>
         <div style={{ padding: '12px', 'border-top': '1px solid var(--n-border-color, #eee)', 'margin-top': 'auto' }}>
@@ -90,8 +104,11 @@ export default function App() {
         <Show when={active() === 'config'}>
           <Settings />
         </Show>
-        <Show when={active() === 'shortcut-hover'}>
+        <Show when={active() === 'hover'}>
           <ShortcutHoverSettings />
+        </Show>
+        <Show when={active() === 'selection'}>
+          <SelectionSettings />
         </Show>
       </main>
     </div>
