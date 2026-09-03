@@ -4,8 +4,8 @@ import {
   updateHoverConfig,
   DEFAULT_HOVER_CONFIG,
   type HoverIconPosition,
+  type ImagePayloadMode,
 } from '../store/hoverConfig'
-
 export default function ShortcutHoverSettings() {
   const [hoverEnabled, setHoverEnabled] = createSignal(DEFAULT_HOVER_CONFIG.hoverEnabled)
   const [hoverHighlight, setHoverHighlight] = createSignal(DEFAULT_HOVER_CONFIG.hoverHighlight)
@@ -19,9 +19,9 @@ export default function ShortcutHoverSettings() {
   const [inlineEnabled, setInlineEnabled] = createSignal(DEFAULT_HOVER_CONFIG.inlineEnabled)
   const [targetLang, setTargetLang] = createSignal(DEFAULT_HOVER_CONFIG.targetLang)
   const [shortcutKey, setShortcutKey] = createSignal(DEFAULT_HOVER_CONFIG.shortcutKey)
+  const [imageMode, setImageMode] = createSignal<ImagePayloadMode>(DEFAULT_HOVER_CONFIG.imageMode)
   const [saving, setSaving] = createSignal(false)
   const [msg, setMsg] = createSignal('')
-
   onMount(async () => {
     const cfg = await loadHoverConfig()
     setHoverEnabled(cfg.hoverEnabled)
@@ -36,6 +36,7 @@ export default function ShortcutHoverSettings() {
     setInlineEnabled(cfg.inlineEnabled)
     setTargetLang(cfg.targetLang)
     setShortcutKey(cfg.shortcutKey)
+    setImageMode(cfg.imageMode)
   })
 
   const save = async (patch: Record<string, unknown>) => {
@@ -131,6 +132,26 @@ export default function ShortcutHoverSettings() {
             />
             启用行下插入（关闭则快捷键不 inject）
           </label>
+          <label style={{ display: 'flex', 'align-items': 'center', gap: '8px', 'font-size': '13px' }}>
+            <span style={{ width: '120px' }}>图片翻译模式</span>
+            <select
+              value={imageMode()}
+              onChange={(e) => {
+                const v = e.currentTarget.value as ImagePayloadMode
+                setImageMode(v)
+                void save({ imageMode: v })
+              }}
+              class="n-input"
+              style={{ flex: '1', padding: '6px 8px', 'border-radius': '6px', border: '1px solid #e5e7eb' }}
+            >
+              <option value="auto">智能（小图 base64 / 大图·跨域 URL）</option>
+              <option value="url">始终 URL（服务端拉取，省 base64）</option>
+              <option value="base64">始终 Base64（本地转码，失败回退 URL）</option>
+            </select>
+          </label>
+          <div style={{ 'font-size': '11px', color: '#6b7280', 'line-height': '1.4' }}>
+            远端地址走后端 <code>reqwest</code> 拉取（跳过 CORS），超时 40s；base64 过大（&gt;10MiB）自动回退 URL，对应服务端 §3.1 混用
+          </div>
         </div>
       </div>
 

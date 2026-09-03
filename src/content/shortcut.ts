@@ -14,20 +14,27 @@ import * as SelectionNS from './utils/selection'
 
 type TranslateReq = { type: 'SAI_TRANSLATE'; kind?: 'text' | 'image'; text: string; imageDataUrl?: string; imageUrl?: string; target?: string; requestId: string }
 type TranslateRes = { type: 'SAI_TRANSLATE_RESULT'; requestId: string; ok: boolean; translated?: string; error?: string; model?: string; annotatedDataUrl?: string }
+type ImagePayloadMode = 'auto' | 'url' | 'base64'
 
 let shortcutKey = 'KeyQ'
 let targetLang = '中文'
+let imageMode: ImagePayloadMode = 'auto'
+
+function parseImageMode(v: unknown): ImagePayloadMode {
+  return v === 'url' || v === 'base64' || v === 'auto' ? v : 'auto'
+}
 
 async function loadConfig() {
   try {
-    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang'])
+    const raw = await chrome.storage.local.get(['sai_translate_shortcut_key', 'sai_translate_target_lang', 'sai_translate_image_mode'])
     const sk = raw['sai_translate_shortcut_key']
     if (typeof sk === 'string' && sk) shortcutKey = sk
     const tl = raw['sai_translate_target_lang']
     if (typeof tl === 'string' && tl) targetLang = tl
+    const im = raw['sai_translate_image_mode']
+    imageMode = parseImageMode(im)
   } catch {}
 }
-
 function genId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -40,21 +47,28 @@ function resolveImageHelpers() {
     findBestImageForRange: ns['findBestImageForRange'] as ((range: Range, exclude?: string) => HTMLImageElement | null) | undefined,
     findBestImageAtPoint: ns['findBestImageAtPoint'] as ((x: number, y: number, exclude?: string) => HTMLImageElement | null) | undefined,
     getImageDataURLForTranslation: ns['getImageDataURLForTranslation'] as ((img: HTMLImageElement) => Promise<string | null>) | undefined,
-    getImagePayloadForTranslation: ns['getImagePayloadForTranslation'] as ((img: HTMLImageElement) => Promise<{ url: string; mode: 'data' | 'url' } | null>) | undefined,
+    getImagePayloadForTranslation: ns['getImagePayloadForTranslation'] as ((img: HTMLImageElement, mode?: ImagePayloadMode) => Promise<{ url: string; mode: 'data' | 'url' } | null>) | undefined,
     isCrossOriginUrl: ns['isCrossOriginUrl'] as ((src: string) => boolean) | undefined,
     isLargeImage: ns['isLargeImage'] as ((img: HTMLImageElement) => boolean) | undefined,
   }
 }
 
 async function getPayloadForImage(img: HTMLImageElement): Promise<string | null> {
+  // 首选：走 selection 的新 payload 接口（带模式）
   try {
     const h = resolveImageHelpers()
     if (h.getImagePayloadForTranslation) {
-      const p = await h.getImagePayloadForTranslation(img)
-      if (p && typeof p.url === 'string' && p.url) return p.url
+      try {
+        const p = await (h.getImagePayloadForTranslation as unknown as (img: HTMLImageElement, mode: ImagePayloadMode) => Promise<{ url: string; mode: 'data' | 'url' } | null>)(img, imageMode)
+        if (p && typeof p.url === 'string' && p.url) return p.url
+      } catch {
+        // 兼容旧签名（无 mode 参数）
+        const p2 = await (h.getImagePayloadForTranslation as unknown as (img: HTMLImageElement) => Promise<{ url: string; mode: 'data' | 'url' } | null>)(img)
+        if (p2 && typeof p2.url === 'string' && p2.url) return p2.url
+      }
     }
   } catch {}
-  // fallback — mirror selection.ts hybrid logic without relying on new export
+  // fallback — 按设置模式镜像 selection 逻辑，不依赖新导出
   try {
     const rawSrc = (img.currentSrc || img.src || '').trim()
     if (!rawSrc) return null
@@ -67,22 +81,30 @@ async function getPayloadForImage(img: HTMLImageElement): Promise<string | null>
       if (d) return d
       return null
     }
+    if (!/^https?:\/\//i.test(rawSrc)) return null
+    // 强制模式
+    if (imageMode === 'url') return rawSrc
+    if (imageMode === 'base64') {
+      const h3 = resolveImageHelpers()
+      const getter = h3.getImageDataURLForTranslation || getImageDataURLFallback
+      const data = await getter(img)
+      if (data) return data
+      return rawSrc
+    }
+    // auto：跨域/大图走 URL，否则优先 base64
     const isCross = (() => {
       try { return new URL(rawSrc, location.href).origin !== location.origin } catch { return false }
     })()
     const isLarge = img.naturalWidth * img.naturalHeight > 1_000_000 || Math.max(img.naturalWidth, img.naturalHeight) > 1600
-    if (isCross || isLarge) {
-      if (/^https?:\/\//i.test(rawSrc)) return rawSrc
-    }
-    const h3 = resolveImageHelpers()
-    const getter2 = h3.getImageDataURLForTranslation || getImageDataURLFallback
+    if (isCross || isLarge) return rawSrc
+    const h4 = resolveImageHelpers()
+    const getter2 = h4.getImageDataURLForTranslation || getImageDataURLFallback
     const data = await getter2(img)
     if (data) return data
-    if (/^https?:\/\//i.test(rawSrc)) return rawSrc
+    return rawSrc
   } catch {}
   return null
 }
-
 
 function getCurrentImageAnchor(): HTMLImageElement | null {
   const hoverAny = HoverNS as unknown as Record<string, unknown>
@@ -682,6 +704,10 @@ export function initShortcut() {
     if ('sai_translate_target_lang' in changes) {
       const v = changes['sai_translate_target_lang']?.newValue
       if (typeof v === 'string') targetLang = v
+    }
+    if ('sai_translate_image_mode' in changes) {
+      const v = changes['sai_translate_image_mode']?.newValue
+      imageMode = parseImageMode(v)
     }
   })
   window.addEventListener('keydown', (e) => {

@@ -573,11 +573,10 @@ export function isValidText(text: string): boolean {
 }
 
 // --- Image helpers for Vision translation — hybrid base64 / URL  ---
-// 策略：小图（同源且 <=1M 像素且边长 <=1600）走 canvas base64；
-// 大图（>1M 像素或边长>1600）或跨域（origin 不同）直接走 http(s) URL，由服务端 reqwest 拉取跳过 CORS。
+// 策略（可由设置强制）：auto=小图同源 base64，大图/跨域 URL；url=强制 URL；base64=强制 base64（失败回退 URL）。
 // 对应 OPENAI_COMPAT_API.md §3.1：image_url.url 支持 data:* 与 http(s) 远端混用。
 export type ImagePayload = { url: string; mode: 'data' | 'url' }
-
+export type ImagePayloadMode = 'auto' | 'url' | 'base64'
 export function isCrossOriginUrl(src: string): boolean {
   try {
     const u = new URL(src, location.href)
@@ -634,13 +633,13 @@ async function canvasEncodeForPayload(img: HTMLImageElement): Promise<string | n
   }
 }
 
-export async function getImagePayloadForTranslation(img: HTMLImageElement): Promise<ImagePayload | null> {
+export async function getImagePayloadForTranslation(img: HTMLImageElement, mode: ImagePayloadMode = 'auto'): Promise<ImagePayload | null> {
   if (!img || !(img instanceof HTMLImageElement)) return null
   if (!isTranslatableImage(img)) return null
   const rawSrc = (img.currentSrc || img.src || '').trim()
   if (!rawSrc) return null
   const low = rawSrc.toLowerCase()
-  // 已是 data: 直接返回
+  // 已是 data: 直接返回（不受模式影响）
   if (low.startsWith('data:image/')) {
     return { url: rawSrc, mode: 'data' }
   }
@@ -657,22 +656,52 @@ export async function getImagePayloadForTranslation(img: HTMLImageElement): Prom
   } catch {
     return null
   }
+  const normalized: ImagePayloadMode = mode === 'url' || mode === 'base64' ? mode : 'auto'
+  if (normalized === 'url') {
+    // 强制 URL：直接走远端，交服务端 reqwest 拉取
+    return { url: rawSrc, mode: 'url' }
+  }
+  if (normalized === 'base64') {
+    // 强制 base64：优先 canvas，失败尝试后台 fetch 拿 base64，最终回退 URL 保证可译
+    try {
+      const data = await canvasEncodeForPayload(img)
+      if (data) {
+        const b64 = (data.split(',')[1] || '')
+        const bytes = Math.ceil(b64.length * 0.75)
+        if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
+          return { url: data, mode: 'data' }
+        }
+      }
+    } catch {}
+    try {
+      const fetched = await fetchImageViaBackground(rawSrc)
+      if (fetched) {
+        const b64 = (fetched.split(',')[1] || '')
+        const bytes = Math.ceil(b64.length * 0.75)
+        if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
+          return { url: fetched, mode: 'data' }
+        }
+        // fetched 过大也尝试返回（已是压缩后），仍按 data 交付
+        return { url: fetched, mode: 'data' }
+      }
+    } catch {}
+    // 彻底失败回退 URL，避免无法翻译
+    return { url: rawSrc, mode: 'url' }
+  }
+  // auto：跨域或大图走 URL，小图同源优先 base64
   const cross = isCrossOriginUrl(rawSrc)
   const large = isLargeImage(img)
   if (cross || large) {
     return { url: rawSrc, mode: 'url' }
   }
-  // 小图同源：优先 canvas base64，失败回退 URL
   try {
     const data = await canvasEncodeForPayload(img)
     if (data) {
-      // 仍做 10MiB/14M guard，与现有 getImageDataURLForTranslation 一致
       const b64 = (data.split(',')[1] || '')
       const bytes = Math.ceil(b64.length * 0.75)
       if (bytes <= 10 * 1024 * 1024 && b64.length <= 14_000_000) {
         return { url: data, mode: 'data' }
       }
-      // 过大仍走 URL
     }
   } catch {}
   return { url: rawSrc, mode: 'url' }
@@ -687,12 +716,10 @@ export function isTranslatableImage(img: HTMLImageElement): boolean {
   if (low.startsWith('data:image/')) {
     // data URL allowed
   } else if (low.startsWith('blob:')) {
-    return false
+    // blob: 允许由 canvasEncodeForPayload / getImagePayload 处理，不在此拦截
   } else {
     try {
       const url = new URL(src, location.href)
-      // 允许跨域（pixiv www.pixiv.net → i.pximg.net 等 CDN），不再卡同源
-      // 仅拦截非 http(s) 与 chrome 域
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
     } catch {
       return false

@@ -1,6 +1,7 @@
 import { createSignal } from 'solid-js'
 
 export type HoverIconPosition = 'top-right' | 'bottom-right'
+export type ImagePayloadMode = 'auto' | 'url' | 'base64'
 
 export type HoverConfig = {
   hoverEnabled: boolean
@@ -15,21 +16,22 @@ export type HoverConfig = {
   inlineEnabled: boolean
   targetLang: string
   shortcutKey: string
+  imageMode: ImagePayloadMode
 }
-
 export const DEFAULT_HOVER_CONFIG: HoverConfig = {
- hoverEnabled: true,
- hoverHighlight: true,
- hoverIcon: true,
- hoverDashed: true,
- hoverHighlightColor: '#fef08a',
- hoverDashedColor: '#e5e7eb',
- hoverDashedWidth: 1,
- hoverIconPosition: 'top-right',
- hoverExcludeSelectors: 'pre,code,[contenteditable]',
- inlineEnabled: true,
- targetLang: '中文',
- shortcutKey: 'KeyQ',
+  hoverEnabled: true,
+  hoverHighlight: true,
+  hoverIcon: true,
+  hoverDashed: true,
+  hoverHighlightColor: '#fef08a',
+  hoverDashedColor: '#e5e7eb',
+  hoverDashedWidth: 1,
+  hoverIconPosition: 'top-right',
+  hoverExcludeSelectors: 'pre,code,[contenteditable]',
+  inlineEnabled: true,
+  targetLang: '中文',
+  shortcutKey: 'KeyQ',
+  imageMode: 'auto',
 }
 
 // Keep alias for convenience / backwards compat with spec wording
@@ -49,8 +51,8 @@ export const STORAGE_KEYS = {
   inlineEnabled: 'sai_translate_inline_enabled',
   targetLang: 'sai_translate_target_lang',
   shortcutKey: 'sai_translate_shortcut_key',
+  imageMode: 'sai_translate_image_mode',
 } as const
-
 // Also export individual key constants for direct chrome.storage access (content/background)
 export const HOVER_ENABLED_KEY = STORAGE_KEYS.hoverEnabled
 export const HOVER_HIGHLIGHT_KEY = STORAGE_KEYS.hoverHighlight
@@ -64,6 +66,7 @@ export const HOVER_EXCLUDE_SELECTORS_KEY = STORAGE_KEYS.hoverExcludeSelectors
 export const INLINE_ENABLED_KEY = STORAGE_KEYS.inlineEnabled
 export const TARGET_LANG_KEY = STORAGE_KEYS.targetLang
 export const SHORTCUT_KEY = STORAGE_KEYS.shortcutKey
+export const IMAGE_MODE_KEY = STORAGE_KEYS.imageMode
 
 export function getChromeStorage(): chrome.storage.StorageArea | null {
   try {
@@ -83,16 +86,15 @@ function parseString(v: unknown, fallback: string): string {
 }
 
 function parseNumber(v: unknown, fallback: number): number {
-  if (typeof v === 'number' && Number.isFinite(v)) return v
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v)
-    if (Number.isFinite(n)) return n
-  }
-  return fallback
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
 function parseIconPosition(v: unknown, fallback: HoverIconPosition): HoverIconPosition {
   return v === 'top-right' || v === 'bottom-right' ? v : fallback
+}
+
+function parseImageMode(v: unknown, fallback: ImagePayloadMode): ImagePayloadMode {
+  return v === 'auto' || v === 'url' || v === 'base64' ? v : fallback
 }
 
 const ALL_KEYS = Object.values(STORAGE_KEYS)
@@ -110,6 +112,7 @@ const [hoverExcludeSelectors, setHoverExcludeSelectors] = createSignal<string>(D
 const [inlineEnabled, setInlineEnabled] = createSignal<boolean>(DEFAULT_HOVER_CONFIG.inlineEnabled)
 const [targetLang, setTargetLang] = createSignal<string>(DEFAULT_HOVER_CONFIG.targetLang)
 const [shortcutKey, setShortcutKey] = createSignal<string>(DEFAULT_HOVER_CONFIG.shortcutKey)
+const [imageMode, setImageMode] = createSignal<ImagePayloadMode>(DEFAULT_HOVER_CONFIG.imageMode)
 
 // Combined signal helper — returns snapshot of all fields
 function getHoverConfig(): HoverConfig {
@@ -126,6 +129,7 @@ function getHoverConfig(): HoverConfig {
     inlineEnabled: inlineEnabled(),
     targetLang: targetLang(),
     shortcutKey: shortcutKey(),
+    imageMode: imageMode(),
   }
 }
 
@@ -147,6 +151,7 @@ function applyRaw(raw: Record<string, unknown>) {
   setInlineEnabled(parseBoolean(raw[STORAGE_KEYS.inlineEnabled], DEFAULT_HOVER_CONFIG.inlineEnabled))
   setTargetLang(parseString(raw[STORAGE_KEYS.targetLang], DEFAULT_HOVER_CONFIG.targetLang))
   setShortcutKey(parseString(raw[STORAGE_KEYS.shortcutKey], DEFAULT_HOVER_CONFIG.shortcutKey))
+  setImageMode(parseImageMode(raw[STORAGE_KEYS.imageMode], DEFAULT_HOVER_CONFIG.imageMode))
 }
 
 export async function loadHoverConfig(): Promise<HoverConfig> {
@@ -180,7 +185,6 @@ export async function loadHoverConfig(): Promise<HoverConfig> {
 
 // Alias required by some specs
 export const load = loadHoverConfig
-
 function toStorageRecord(cfg: HoverConfig): Record<string, unknown> {
   return {
     [STORAGE_KEYS.hoverEnabled]: cfg.hoverEnabled,
@@ -195,9 +199,9 @@ function toStorageRecord(cfg: HoverConfig): Record<string, unknown> {
     [STORAGE_KEYS.inlineEnabled]: cfg.inlineEnabled,
     [STORAGE_KEYS.targetLang]: cfg.targetLang,
     [STORAGE_KEYS.shortcutKey]: cfg.shortcutKey,
+    [STORAGE_KEYS.imageMode]: cfg.imageMode,
   }
 }
-
 function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
   const rec: Record<string, unknown> = {}
   if (patch.hoverEnabled !== undefined) rec[STORAGE_KEYS.hoverEnabled] = patch.hoverEnabled
@@ -212,6 +216,7 @@ function patchToRecord(patch: Partial<HoverConfig>): Record<string, unknown> {
   if (patch.inlineEnabled !== undefined) rec[STORAGE_KEYS.inlineEnabled] = patch.inlineEnabled
   if (patch.targetLang !== undefined) rec[STORAGE_KEYS.targetLang] = patch.targetLang
   if (patch.shortcutKey !== undefined) rec[STORAGE_KEYS.shortcutKey] = patch.shortcutKey
+  if (patch.imageMode !== undefined) rec[STORAGE_KEYS.imageMode] = patch.imageMode
   return rec
 }
 
@@ -233,7 +238,6 @@ export async function persistHoverConfig(cfg?: HoverConfig): Promise<void> {
 }
 
 export const persist = persistHoverConfig
-
 function applyPatchToSignals(patch: Partial<HoverConfig>) {
   if (patch.hoverEnabled !== undefined) setHoverEnabled(patch.hoverEnabled)
   if (patch.hoverHighlight !== undefined) setHoverHighlight(patch.hoverHighlight)
@@ -247,6 +251,7 @@ function applyPatchToSignals(patch: Partial<HoverConfig>) {
   if (patch.inlineEnabled !== undefined) setInlineEnabled(patch.inlineEnabled)
   if (patch.targetLang !== undefined) setTargetLang(patch.targetLang)
   if (patch.shortcutKey !== undefined) setShortcutKey(patch.shortcutKey)
+  if (patch.imageMode !== undefined) setImageMode(patch.imageMode)
 }
 
 export async function updateHoverConfig(patch: Partial<HoverConfig>): Promise<HoverConfig> {
@@ -301,6 +306,8 @@ export function useHoverConfig() {
     inlineEnabled,
     targetLang,
     shortcutKey,
+    imageMode,
+    setImageMode,
     loadHoverConfig,
     load,
     persistHoverConfig,
@@ -338,6 +345,8 @@ export {
   setTargetLang,
   shortcutKey,
   setShortcutKey,
+  imageMode,
+  setImageMode,
   hoverConfig,
   getHoverConfig,
 }
